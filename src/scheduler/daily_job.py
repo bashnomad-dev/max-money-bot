@@ -73,13 +73,53 @@ async def gc_job(ctx: "AppContext") -> None:
 
 
 async def pending_writes_retry_job(ctx: "AppContext", client: "MAXClient") -> None:
-    """Ретрай отложенных записей в Sheets. Запускается каждую минуту."""
-    pending = ctx.pending_writes.list_ready(max_attempts=100)
+    """Ретрай отложенных записей в Sheets. Запускается каждую минуту.
+
+    Стратегия: рематериализуем pydantic-операцию из payload, заново вызываем
+    write_rehydrated. При успехе — удаляем из очереди и уведомляем клиента.
+    При повторной ошибке — увеличиваем счётчик попыток (мягкий exp-backoff
+    через ограничение max_attempts).
+    """
+    from src.bot.pipeline import rehydrate_parsed, write_rehydrated
+    from src.bot.text_responses import WROTE_REACTION
+
+    pending = ctx.pending_writes.list_ready(max_attempts=10)
     if not pending:
         return
     log.info("pending_writes_retry: %d ожидающих", len(pending))
-    # TODO: десериализовать parsed_class из payload и попробовать снова через pipeline
-    # Полная реализация — после интеграционного теста с Sheets.
+
+    for row in pending:
+        pid = row["id"]
+        chat_id = row["chat_id"]
+        payload = row["payload"]
+        try:
+            parsed = rehydrate_parsed(payload["parsed_class"], payload["parsed_json"])
+        except Exception as e:  # noqa: BLE001
+            log.exception("pending_writes_retry: rehydrate failed для pid=%s", pid)
+            ctx.pending_writes.mark_attempt(pid, f"rehydrate: {e}")
+            continue
+
+        try:
+            result = await write_rehydrated(
+                ctx,
+                parsed,
+                chat_id=chat_id,
+                user_id=row.get("user_id") or "system",
+                message_id=f"retry_{pid}",
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("pending_writes_retry: write failed для pid=%s", pid)
+            ctx.pending_writes.mark_attempt(pid, str(e)[:500])
+            continue
+
+        ctx.pending_writes.delete(pid)
+        log.info("pending_writes_retry: pid=%s записан", pid)
+        # Уведомить клиента — короткий текст, без реакции на retry
+        try:
+            note = "✅ записал отложенную операцию" if result == WROTE_REACTION else result
+            await client.send_message(chat_id, note)
+        except Exception:  # noqa: BLE001
+            log.exception("pending_writes_retry: уведомить чат не удалось pid=%s", pid)
 
 
 def start_scheduler(ctx: "AppContext", client: "MAXClient | None"):

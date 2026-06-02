@@ -111,13 +111,17 @@ systemctl status maxbot
 journalctl -u maxbot -f       # логи в реальном времени
 ```
 
-### 5. Бэкап Sheets (опц.)
-Cron от пользователя maxbot:
+### 5. Бэкап Sheets
+Скрипт `scripts/backup_sheets.py` выгружает все привязанные таблицы (DEFAULT_SHEET_ID + `chat_sheets`) в `backups/<sheet>-<YYYY-MM-DD-HHMM>.xlsx`, ротация — последние 12.
+
 ```bash
-# crontab -e
+.venv/bin/pip install openpyxl   # одноразово, если не было
+# проверка вручную
+.venv/bin/python -m scripts.backup_sheets
+
+# crontab -e (каждое воскресенье в 03:00)
 0 3 * * 0 cd /home/maxbot/max-money-bot && .venv/bin/python -m scripts.backup_sheets >> /home/maxbot/backup.log 2>&1
 ```
-(скрипт `scripts/backup_sheets.py` — TODO, выгружает Sheets в `.xlsx`)
 
 ## Обновление кода
 

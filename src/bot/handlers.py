@@ -14,7 +14,7 @@ from typing import Any
 
 from src.bot.access import check_pin, is_allowed
 from src.bot.context import AppContext
-from src.bot.pipeline import process_parsed
+from src.bot.pipeline import process_parsed, rehydrate_parsed, write_rehydrated
 from src.bot.text_responses import (
     CANCEL_DONE_MSG,
     CANCEL_NOTHING_MSG,
@@ -414,35 +414,63 @@ def make_handlers(client, ctx: AppContext) -> dict[str, Any]:
     async def _process_confirm_response(message: Any, text: str, state: dict) -> None:
         chat_id = _chat_id(message)
         user_id = _user_id(message)
+        partial = state["partial_data"]
         lower = text.lower().strip()
-        if lower in ("да", "ага", "ок", "верно", "+"):
-            # TODO: рематериализовать parsed из partial_data и записать
-            # (полная реализация — после реальных тестов с Sheets)
+
+        async def _do_write_from_state() -> None:
+            try:
+                parsed = rehydrate_parsed(partial["parsed_class"], partial["parsed_json"])
+            except Exception:
+                log.exception("rehydrate failed")
+                ctx.dialog.clear(chat_id)
+                await client.reply(message, "Не получилось восстановить операцию. Продиктуй заново.")
+                return
             ctx.dialog.clear(chat_id)
-            await client.reply(message, "✅ записал")
+            result = await write_rehydrated(
+                ctx, parsed, chat_id=chat_id, user_id=user_id, message_id=_message_id(message),
+            )
+            await _send(message, result)
+
+        if lower in ("да", "ага", "ок", "верно", "+", "новая"):
+            await _do_write_from_state()
             return
-        if lower in ("повтор",):
+        if lower in ("нет", "повтор", "не записывай"):
             ctx.dialog.clear(chat_id)
             await client.reply(message, "Понял — не записываю.")
             return
-        if lower in ("новая",):
-            ctx.dialog.clear(chat_id)
-            await client.reply(message, "Записываю как новую…")
-            # TODO: записать без проверки дедупа
-            return
-        # Иначе пробуем парсить как правку (например «не 15, а 50»)
         ctx.dialog.clear(chat_id)
         await client.reply(message, "Не понял ответ. Если что-то не так — продиктуй заново.")
 
     async def _process_canon_response(message: Any, text: str, state: dict) -> None:
         chat_id = _chat_id(message)
+        user_id = _user_id(message)
         partial = state["partial_data"]
         candidates = partial.get("candidates", [])
         lower = text.lower().strip()
-        if lower == "новый":
-            # TODO: добавить товар в каталог и записать операцию
+
+        async def _write_with_canon(canon_name: str | None) -> None:
+            """canon_name=None → пишем как есть (новый товар), иначе подменяем все строки."""
+            try:
+                parsed = rehydrate_parsed(partial["parsed_class"], partial["parsed_json"])
+            except Exception:
+                log.exception("rehydrate failed")
+                ctx.dialog.clear(chat_id)
+                await client.reply(message, "Не получилось восстановить операцию. Продиктуй заново.")
+                return
+            if canon_name and hasattr(parsed, "lines"):
+                # подменяем только товары без точного матча в каталоге
+                for line in parsed.lines:
+                    matches = ctx.catalog.lookup(line.name, top_k=1, min_score=0.99)
+                    if not matches:
+                        line.name = canon_name
             ctx.dialog.clear(chat_id)
-            await client.reply(message, "Окей, завожу как новый товар.")
+            result = await write_rehydrated(
+                ctx, parsed, chat_id=chat_id, user_id=user_id, message_id=_message_id(message),
+            )
+            await _send(message, result)
+
+        if lower == "новый":
+            await _write_with_canon(None)
             return
         try:
             idx = int(lower)
@@ -450,10 +478,7 @@ def make_handlers(client, ctx: AppContext) -> dict[str, Any]:
             await client.reply(message, "Не понял. Ответь номером (1, 2, 3) или «новый».")
             return
         if 1 <= idx <= len(candidates):
-            chosen = candidates[idx - 1]
-            ctx.dialog.clear(chat_id)
-            # TODO: подменить product.name в parsed на chosen и записать
-            await client.reply(message, f"Выбрал: {chosen}. Записываю…")
+            await _write_with_canon(candidates[idx - 1])
             return
         await client.reply(message, f"Номер должен быть от 1 до {len(candidates)}.")
 

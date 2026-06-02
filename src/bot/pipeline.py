@@ -48,6 +48,8 @@ from src.sheets.writer import (
     write_sale,
     write_writeoff_or_movement,
 )
+from src.stock.calculator import recompute_from_movements
+from src.stock.sheets_sync import _read_goods_rows, sync_after_op
 
 log = logging.getLogger(__name__)
 
@@ -247,11 +249,82 @@ async def _do_write(
             ttl_minutes=settings.dedup_window_minutes,
         )
 
-    # TODO: апдейт листа «Остатки» через src.stock.sheets_sync.sync_after_op
-    # (отложено до интеграционного теста с реальной Sheets — там доделаем)
+    # Апдейт листа «Остатки» для затронутых (товар, точка). При ошибке — не блокируем.
+    affected = _affected_stock_keys(parsed)
+    if affected:
+        try:
+            rows = _read_goods_rows(spreadsheet)
+            calc = recompute_from_movements(rows)
+            sync_after_op(spreadsheet, calc, affected)
+        except Exception:
+            log.exception("sync_after_op failed для tx_id=%s; запускай /repair stock", result.tx_id)
 
     # Возвращаем маркер «реакция» (хендлер сам поставит ✅) либо текст
     return WROTE_REACTION  # маркер для хендлера
+
+
+_PARSED_CLASSES = {
+    "Sale": Sale,
+    "Purchase": Purchase,
+    "Return": Return,
+    "Cashflow": Cashflow,
+    "WriteoffOrMovement": WriteoffOrMovement,
+    "Inventory": Inventory,
+}
+
+
+def rehydrate_parsed(parsed_class: str, parsed_json: dict) -> Any:
+    """Восстановить pydantic-операцию из сохранённого JSON.
+
+    Используется в handlers для подтверждения карточки и в pending_writes_retry_job.
+    """
+    cls = _PARSED_CLASSES.get(parsed_class)
+    if cls is None:
+        raise ValueError(f"Неизвестный parsed_class: {parsed_class}")
+    return cls.model_validate(parsed_json)
+
+
+async def write_rehydrated(
+    ctx: AppContext,
+    parsed: Any,
+    chat_id: str,
+    user_id: str,
+    message_id: str,
+) -> str:
+    """Записать уже рематериализованную операцию в Sheets (минуя UX-правила).
+
+    Используется при подтверждении карточки — UX-проверки уже пройдены раньше.
+    """
+    semhash = None
+    if isinstance(parsed, (Sale, Purchase, Return, Cashflow, WriteoffOrMovement)):
+        semhash = semantic_hash(parsed)
+    return await _do_write(ctx, parsed, chat_id, user_id, message_id, semhash)
+
+
+def _affected_stock_keys(op: Any) -> set[tuple[str, str]]:
+    """Извлечь все пары (товар, точка), которые меняются операцией."""
+    keys: set[tuple[str, str]] = set()
+    if isinstance(op, Sale):
+        for line in op.lines:
+            keys.add((line.name, op.location.value))
+    elif isinstance(op, Purchase):
+        for line in op.lines:
+            keys.add((line.name, op.destination.value))
+    elif isinstance(op, Return):
+        for line in op.lines:
+            keys.add((line.name, op.location.value))
+    elif isinstance(op, WriteoffOrMovement):
+        for line in op.lines:
+            if op.op_type.value == "перемещение":
+                if op.source: keys.add((line.name, op.source.value))
+                if op.destination: keys.add((line.name, op.destination.value))
+            else:
+                if op.location: keys.add((line.name, op.location.value))
+    elif isinstance(op, Inventory):
+        for fact in op.facts:
+            keys.add((fact.name, op.location.value))
+    # Cashflow → товаров не трогает
+    return keys
 
 
 def _dispatch_write(spreadsheet, op: Any):
