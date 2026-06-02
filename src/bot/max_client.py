@@ -1,13 +1,20 @@
-"""Тонкая обёртка над `maxapi` (Python SDK для MAX Bot API).
+"""Адаптер над maxapi 1.x.
 
-Все импорты maxapi — ленивые внутри методов, чтобы тесты могли импортировать
-этот модуль без установленного пакета.
+Цели:
+  - инкапсулировать Bot/Dispatcher из maxapi (ленивая инициализация);
+  - дать handlers.py одинаковый API send_message / reply / react / download_voice
+    независимо от деталей пакета;
+  - не пускать наружу типы maxapi там, где можно обойтись dict-подобными атрибутами.
+
+В хендлеры приходит maxapi.types.Message (см. router.py — мы разворачиваем
+MessageCreated → message). Это удобно: handlers.py обращается к
+`message.body.text`, `message.recipient.chat_id`, `message.reply(...)`, и т.п.
 """
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Callable, Coroutine
+from typing import Any
 
 from src.config.settings import settings
 
@@ -15,19 +22,15 @@ log = logging.getLogger(__name__)
 
 
 class MAXClient:
-    """Простой адаптер: send/reply/react + регистрация хендлеров.
-
-    API maxapi нативно похож на aiogram. Если в реальном пакете методы
-    называются иначе — правим тут локально, остальной код не трогаем.
-    """
+    """Тонкая обёртка над maxapi.Bot + maxapi.Dispatcher."""
 
     def __init__(self) -> None:
-        self._bot = None
-        self._dispatcher = None
+        self._bot: Any = None
+        self._dispatcher: Any = None
         if not settings.max_bot_token:
             raise RuntimeError("MAX_BOT_TOKEN не задан в .env")
 
-    def _init_bot(self):
+    def _init_bot(self) -> None:
         if self._bot is not None:
             return
         try:
@@ -40,107 +43,85 @@ class MAXClient:
         self._dispatcher = Dispatcher()
 
     @property
-    def bot(self):
+    def bot(self) -> Any:
         self._init_bot()
         return self._bot
 
     @property
-    def dispatcher(self):
+    def dispatcher(self) -> Any:
         self._init_bot()
         return self._dispatcher
 
-    async def send_message(self, chat_id: str | int, text: str) -> None:
-        await self.bot.send_message(chat_id=chat_id, text=text)
+    # ===== Outgoing =====
 
-    async def reply(self, message, text: str) -> None:
-        """Ответ на конкретное сообщение (с reply_to)."""
+    async def send_message(self, chat_id: int | str, text: str) -> None:
+        try:
+            cid = int(chat_id)
+        except (TypeError, ValueError):
+            log.error("Не могу преобразовать chat_id=%r к int", chat_id)
+            return
+        await self.bot.send_message(chat_id=cid, text=text)
+
+    async def reply(self, message: Any, text: str) -> None:
+        """Ответ конкретному сообщению. Падает обратно на send_message если body=None."""
         try:
             await message.reply(text)
+            return
         except Exception:  # noqa: BLE001
-            # fallback на send в чат, если reply API нет
-            chat_id = getattr(message, "chat_id", None) or getattr(message.chat, "id", None)
-            await self.send_message(chat_id, text)
+            log.exception("reply failed, fallback to send_message")
+        try:
+            chat_id = message.recipient.chat_id
+            if chat_id is not None:
+                await self.send_message(chat_id, text)
+        except Exception:  # noqa: BLE001
+            log.exception("send_message fallback тоже упал")
 
-    async def react(self, message, emoji: str = "✅") -> bool:
-        """Поставить реакцию на сообщение. Возвращает True если успешно.
+    async def react(self, message: Any, emoji: str = "✅") -> bool:
+        """В MAX Bot API 1.x реакций на сообщения нет.
 
-        Если в API maxapi нет реакций — возвращает False, вызывающий код
-        делает fallback на короткий текстовый ответ.
+        Возвращаем False — caller сделает текстовый fallback («✅ записал»).
         """
-        # Пробуем разные потенциальные API
-        for method_name in ("react", "set_reaction", "send_reaction"):
-            method = getattr(message, method_name, None) or getattr(self.bot, method_name, None)
-            if method is None:
-                continue
-            try:
-                await method(emoji)
-                return True
-            except TypeError:
-                # Возможно нужен другой сигнатурой
-                try:
-                    await method(message_id=message.message_id, emoji=emoji)
-                    return True
-                except Exception:  # noqa: BLE001
-                    continue
-            except Exception:  # noqa: BLE001
-                log.exception("Не удалось поставить реакцию через %s", method_name)
-                return False
         return False
 
-    async def download_voice(self, message, dst_dir: Path) -> Path:
-        """Скачать голосовое из MAX. Возвращает путь к файлу."""
-        dst_dir.mkdir(parents=True, exist_ok=True)
-        # Конкретный путь зависит от структуры message в maxapi.
-        # По аналогии с aiogram: message.voice.file_id → bot.download(file_id, dst).
-        file_id = (
-            getattr(getattr(message, "voice", None), "file_id", None)
-            or getattr(message, "file_id", None)
-        )
-        if not file_id:
-            raise RuntimeError("Сообщение не содержит голосового вложения")
-        dst = dst_dir / f"voice_{file_id}.ogg"
-        # download API
-        for method_name in ("download", "download_file", "get_file"):
-            method = getattr(self.bot, method_name, None)
-            if method is None:
-                continue
-            try:
-                await method(file_id, destination=str(dst))
-                return dst
-            except TypeError:
-                try:
-                    file_obj = await method(file_id)
-                    if hasattr(file_obj, "read"):
-                        with dst.open("wb") as f:
-                            f.write(file_obj.read())
-                        return dst
-                except Exception:  # noqa: BLE001
-                    continue
-        raise RuntimeError("Не удалось скачать голосовое — проверь API maxapi")
+    # ===== Voice =====
 
-    def register_message_handler(
-        self,
-        handler: Callable[..., Coroutine[Any, Any, None]],
-        commands: list[str] | None = None,
-        content_types: list[str] | None = None,
-    ) -> None:
-        """Зарегистрировать хендлер. Сигнатура повторяет aiogram-стиль."""
-        # В разных версиях maxapi регистрация может отличаться. Пробуем стандарт.
-        if hasattr(self.dispatcher, "message_handler"):
-            decorator = self.dispatcher.message_handler(
-                commands=commands, content_types=content_types
-            )
-            decorator(handler)
-        elif hasattr(self.dispatcher, "register_message_handler"):
-            self.dispatcher.register_message_handler(
-                handler, commands=commands, content_types=content_types
-            )
-        else:
-            raise RuntimeError("maxapi.Dispatcher не имеет ожидаемого API регистрации хендлеров")
+    async def download_voice(self, message: Any, dst_dir: Path) -> Path:
+        """Скачать первое аудиовложение сообщения в локальный файл.
+
+        В maxapi 1.x аудио в `message.body.attachments` приходит как `Audio` с
+        полем `payload.url` (см. types/attachments/{audio,attachment}.py).
+        Скачиваем через httpx — никаких SDK-вызовов не нужно.
+        """
+        import httpx
+
+        atts = getattr(getattr(message, "body", None), "attachments", None) or []
+        url: str | None = None
+        for a in atts:
+            payload = getattr(a, "payload", None)
+            u = getattr(payload, "url", None)
+            t = str(getattr(a, "type", "") or "").lower()
+            if u and ("audio" in t or t == ""):
+                url = u
+                break
+        if not url:
+            raise RuntimeError("В сообщении нет аудиовложения")
+
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        dst = dst_dir / "voice.bin"
+        async with httpx.AsyncClient(timeout=30) as cli:
+            r = await cli.get(url)
+            r.raise_for_status()
+            dst.write_bytes(r.content)
+        return dst
+
+    # ===== Polling =====
 
     async def start_polling(self) -> None:
-        """Запуск long-polling."""
-        if hasattr(self.dispatcher, "start_polling"):
-            await self.dispatcher.start_polling(self.bot)
-        else:
-            raise RuntimeError("maxapi.Dispatcher не поддерживает start_polling")
+        await self.dispatcher.start_polling(self.bot)
+
+    async def close(self) -> None:
+        if self._bot is not None and hasattr(self._bot, "close_session"):
+            try:
+                await self._bot.close_session()
+            except Exception:  # noqa: BLE001
+                log.exception("close_session упал — продолжаю")

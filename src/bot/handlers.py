@@ -53,28 +53,33 @@ log = logging.getLogger(__name__)
 # ============================================================
 
 def _chat_id(message: Any) -> str:
-    return str(
-        getattr(message, "chat_id", None)
-        or getattr(getattr(message, "chat", None), "id", None)
-        or ""
-    )
+    """maxapi.Message: recipient.chat_id (групповой) либо recipient.user_id (личка)."""
+    rec = getattr(message, "recipient", None)
+    cid = getattr(rec, "chat_id", None)
+    if cid is None:
+        cid = getattr(rec, "user_id", None)
+    if cid is None:
+        cid = getattr(message, "chat_id", None)
+    return str(cid or "")
 
 
 def _user_id(message: Any) -> str:
-    return str(
-        getattr(message, "user_id", None)
-        or getattr(getattr(message, "from_user", None), "id", None)
-        or getattr(message, "sender_id", None)
-        or ""
-    )
+    """Отправитель: maxapi.Message.sender.user_id."""
+    snd = getattr(message, "sender", None)
+    uid = getattr(snd, "user_id", None) or getattr(message, "user_id", None)
+    return str(uid or "")
 
 
 def _message_id(message: Any) -> str:
-    return str(getattr(message, "message_id", None) or getattr(message, "id", None) or "")
+    """maxapi.Message.body.mid (строковый id)."""
+    body = getattr(message, "body", None)
+    mid = getattr(body, "mid", None) or getattr(message, "message_id", None)
+    return str(mid or "")
 
 
 def _text(message: Any) -> str:
-    return str(getattr(message, "text", None) or "")
+    body = getattr(message, "body", None)
+    return str(getattr(body, "text", None) or getattr(message, "text", None) or "")
 
 
 # ============================================================

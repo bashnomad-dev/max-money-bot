@@ -121,10 +121,17 @@ def sync_after_op(
         return 0
 
     ws = spreadsheet.worksheet(SHEET_STOCK)
-    existing = ws.get_all_records()  # list[dict]
-    # Карта (product, location) -> row_index (1-based в листе; +1 за заголовок, +1 за маркер)
+    # Лист может начинаться с системного маркера в A1 — тогда заголовок в строке 2.
     a1_cell = ws.cell(1, 1).value
     header_offset = 2 if (a1_cell and "СИСТЕМНЫЙ" in a1_cell) else 1
+    try:
+        existing = ws.get_all_records(
+            head=header_offset,
+            expected_headers=STOCK_HEADERS,
+        )
+    except TypeError:
+        # старые версии gspread без expected_headers
+        existing = ws.get_all_records(head=header_offset)
     existing_map: dict[tuple[str, str], int] = {}
     for i, rec in enumerate(existing, start=header_offset + 1):
         key = (str(rec.get("Товар", "")).strip(), str(rec.get("Точка", "")).strip())
