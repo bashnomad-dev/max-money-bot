@@ -2,6 +2,10 @@
 
 Эти схемы используются и GigaChat, и Claude (через адаптацию).
 См. полное описание — docs/llm-parsing.md §3.
+
+Nullable-поля выражены через отсутствие в `required` + одиночный `type` —
+GigaChat SDK валидирует параметры через pydantic.Function и не принимает
+массивные типы (`["string", "null"]`). Это совместимо и с Claude tool_use.
 """
 
 UNITS_ENUM = ["шт.", "м2", "м3", "м.п.", "рул", "уп.", "кг", "меш.", "л.", "м"]
@@ -48,9 +52,9 @@ TOOLS = [
                 "amount_rub": {"type": "integer"},
                 "lines": {"type": "array", "minItems": 1, "items": _goods_line_schema()},
                 "location": {"type": "string", "enum": LOCATIONS_ENUM},
-                "customer": {"type": ["string", "null"]},
+                "customer": {"type": "string"},
                 "payment": {"type": "string", "enum": PAYMENT_ENUM},
-                "comment": {"type": ["string", "null"]},
+                "comment": {"type": "string"},
                 **_confidence_fields(),
             },
         },
@@ -70,7 +74,7 @@ TOOLS = [
                 "lines": {"type": "array", "minItems": 1, "items": _goods_line_schema()},
                 "destination": {"type": "string", "enum": LOCATIONS_ENUM},
                 "payment": {"type": "string", "enum": PAYMENT_ENUM},
-                "comment": {"type": ["string", "null"]},
+                "comment": {"type": "string"},
                 **_confidence_fields(),
             },
         },
@@ -91,7 +95,7 @@ TOOLS = [
                 "lines": {"type": "array", "minItems": 1, "items": _goods_line_schema()},
                 "location": {"type": "string", "enum": LOCATIONS_ENUM},
                 "payment": {"type": "string", "enum": PAYMENT_ENUM},
-                "comment": {"type": ["string", "null"]},
+                "comment": {"type": "string"},
                 **_confidence_fields(),
             },
         },
@@ -107,9 +111,9 @@ TOOLS = [
                 "op_type": {"type": "string", "enum": ["расход", "прочий приход", "внесение", "изъятие"]},
                 "amount_rub": {"type": "integer"},
                 "description": {"type": "string"},
-                "category": {"type": ["string", "null"], "enum": [*EXPENSE_CATEGORIES, None]},
-                "counterparty": {"type": ["string", "null"]},
-                "location": {"type": ["string", "null"], "enum": [*LOCATIONS_ENUM, None]},
+                "category": {"type": "string", "enum": EXPENSE_CATEGORIES},
+                "counterparty": {"type": "string"},
+                "location": {"type": "string", "enum": LOCATIONS_ENUM},
                 "payment": {"type": "string", "enum": PAYMENT_ENUM},
                 "text_confidence": {"type": "number", "minimum": 0, "maximum": 1},
                 "amount_confidence": {"type": "number", "minimum": 0, "maximum": 1},
@@ -124,11 +128,11 @@ TOOLS = [
             "required": ["op_type", "lines", "text_confidence", "quantity_confidence"],
             "properties": {
                 "op_type": {"type": "string", "enum": ["списание", "перемещение"]},
-                "location": {"type": ["string", "null"], "enum": [*LOCATIONS_ENUM, None]},
-                "source": {"type": ["string", "null"], "enum": [*LOCATIONS_ENUM, None]},
-                "destination": {"type": ["string", "null"], "enum": [*LOCATIONS_ENUM, None]},
+                "location": {"type": "string", "enum": LOCATIONS_ENUM},
+                "source": {"type": "string", "enum": LOCATIONS_ENUM},
+                "destination": {"type": "string", "enum": LOCATIONS_ENUM},
                 "lines": {"type": "array", "minItems": 1, "items": _goods_line_schema()},
-                "comment": {"type": ["string", "null"]},
+                "comment": {"type": "string"},
                 "text_confidence": {"type": "number", "minimum": 0, "maximum": 1},
                 "quantity_confidence": {"type": "number", "minimum": 0, "maximum": 1},
             },
@@ -168,13 +172,13 @@ TOOLS = [
             "required": ["type"],
             "properties": {
                 "type": {"type": "string", "enum": ["stock", "period_report"]},
-                "product_query": {"type": ["string", "null"]},
-                "location": {"type": ["string", "null"], "enum": [*LOCATIONS_ENUM, None]},
-                "period_type": {"type": ["string", "null"], "enum": ["day", "month", "quarter", "year", "custom", None]},
-                "year": {"type": ["integer", "null"]},
-                "month": {"type": ["integer", "null"], "minimum": 1, "maximum": 12},
-                "quarter": {"type": ["integer", "null"], "minimum": 1, "maximum": 4},
-                "relative": {"type": ["string", "null"], "enum": ["current", "previous", None]},
+                "product_query": {"type": "string"},
+                "location": {"type": "string", "enum": LOCATIONS_ENUM},
+                "period_type": {"type": "string", "enum": ["day", "month", "quarter", "year", "custom"]},
+                "year": {"type": "integer"},
+                "month": {"type": "integer", "minimum": 1, "maximum": 12},
+                "quarter": {"type": "integer", "minimum": 1, "maximum": 4},
+                "relative": {"type": "string", "enum": ["current", "previous"]},
                 "top_metric": {"type": "string", "enum": ["выручка", "прибыль", "количество"]},
                 "period_is_clear": {"type": "boolean"},
             },
@@ -190,8 +194,8 @@ TOOLS = [
                 "reason": {"type": "string"},
                 "question": {"type": "string"},
                 "intent_hint": {
-                    "type": ["string", "null"],
-                    "enum": ["sale", "purchase", "return", "cashflow", "writeoff", "inventory", "report", None],
+                    "type": "string",
+                    "enum": ["sale", "purchase", "return", "cashflow", "writeoff", "inventory", "report"],
                 },
             },
         },
