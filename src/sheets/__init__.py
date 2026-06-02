@@ -12,8 +12,28 @@ from src.sheets.schema import (
     SheetSpec,
 )
 from src.sheets.setup import SheetsSetupError, setup_sheet
+from src.sheets.writer import (
+    SheetRowRef,
+    WriteResult,
+    undo_by_refs,
+    write_cashflow,
+    write_inventory,
+    write_purchase,
+    write_return,
+    write_sale,
+    write_writeoff_or_movement,
+)
 
 __all__ = [
+    "SheetRowRef",
+    "WriteResult",
+    "undo_by_refs",
+    "write_cashflow",
+    "write_inventory",
+    "write_purchase",
+    "write_return",
+    "write_sale",
+    "write_writeoff_or_movement",
     "DEFAULT_CATEGORIES",
     "DEFAULT_LOCATIONS",
     "SHEET_CATEGORIES",
