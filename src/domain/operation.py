@@ -1,3 +1,4 @@
+"""Доменные типы (pydantic v2). Соответствует docs/data-model.md §2."""
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal
@@ -5,13 +6,88 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-# === Enums ===
+class Location(StrEnum):
+    ZININO = "Магазин Зинино"
+    KARMALY = "Магазин Кармалы"
+
 
 class PaymentMethod(StrEnum):
     CASH = "наличные"
     CARD = "карта"
     TRANSFER = "счёт"
     UNKNOWN = "не указано"
+
+
+class Confidence(BaseModel):
+    text: float = Field(ge=0.0, le=1.0)
+    amount: float = Field(default=1.0, ge=0.0, le=1.0)
+    quantity: float = Field(default=1.0, ge=0.0, le=1.0)
+
+    @property
+    def critical(self) -> float:
+        return min(self.text, self.amount, self.quantity)
+
+
+class GoodsLine(BaseModel):
+    name: str
+    qty: float = Field(gt=0)
+    unit: str
+    price_per_unit_rub: float | None = None
+    comment: str | None = None
+
+
+# === Операции ===
+
+class Sale(BaseModel):
+    tx_id: str
+    occurred_at: datetime
+    amount_kopecks: int = Field(gt=0)
+    lines: list[GoodsLine] = Field(min_length=1)
+    location: Location
+    customer: str | None = None
+    payment: PaymentMethod = PaymentMethod.UNKNOWN
+    comment: str | None = None
+    confidence: Confidence
+    raw_text: str
+
+
+class Purchase(BaseModel):
+    tx_id: str
+    occurred_at: datetime
+    amount_kopecks: int = Field(gt=0)
+    supplier: str
+    lines: list[GoodsLine] = Field(min_length=1)
+    destination: Location
+    payment: PaymentMethod = PaymentMethod.UNKNOWN
+    comment: str | None = None
+    confidence: Confidence
+    raw_text: str
+
+
+class ReturnDirection(StrEnum):
+    FROM_CUSTOMER = "from_customer"
+    TO_SUPPLIER = "to_supplier"
+
+
+class Return(BaseModel):
+    tx_id: str
+    direction: ReturnDirection
+    occurred_at: datetime
+    amount_kopecks: int = Field(gt=0)
+    counterparty: str
+    lines: list[GoodsLine] = Field(min_length=1)
+    location: Location
+    payment: PaymentMethod = PaymentMethod.UNKNOWN
+    comment: str | None = None
+    confidence: Confidence
+    raw_text: str
+
+
+class CashflowType(StrEnum):
+    EXPENSE = "расход"
+    OTHER_INCOME = "прочий приход"
+    DEPOSIT = "внесение"
+    WITHDRAWAL = "изъятие"
 
 
 class ExpenseCategory(StrEnum):
@@ -22,28 +98,62 @@ class ExpenseCategory(StrEnum):
     MARKETING = "реклама / маркетинг"
     TRANSPORT = "транспорт / доставка"
     TAXES_BANK = "налоги / банк / эквайринг"
-    EQUIPMENT_REPAIR = "оборудование / ремонт"
+    EQUIPMENT = "оборудование / ремонт"
     OTHER = "прочее"
-    # not-expense-but-used as category for symmetry
-    DEPOSIT = "внесение"
-    WITHDRAWAL = "изъятие"
-    OTHER_INCOME = "прочий приход"
-    SALE = "продажа"
-    RETURN_TO_CUSTOMER = "возврат покупателю"
-    RETURN_FROM_SUPPLIER = "возврат поставщика"
 
 
-class CashflowType(StrEnum):
-    EXPENSE = "расход"
-    OTHER_INCOME = "прочий приход"
-    DEPOSIT = "внесение"
-    WITHDRAWAL = "изъятие"
+class Cashflow(BaseModel):
+    tx_id: str
+    occurred_at: datetime
+    op_type: CashflowType
+    amount_kopecks: int = Field(gt=0)
+    description: str
+    category: ExpenseCategory | None = None
+    counterparty: str | None = None
+    location: Location | None = None
+    payment: PaymentMethod = PaymentMethod.UNKNOWN
+    confidence: Confidence
+    raw_text: str
 
 
-class TopMetric(StrEnum):
-    REVENUE = "по выручке"  # дефолт для магазина
-    PROFIT = "по прибыли"
-    QUANTITY = "по количеству"
+class WriteoffOrMovementType(StrEnum):
+    WRITEOFF = "списание"
+    MOVEMENT = "перемещение"
+
+
+class WriteoffOrMovement(BaseModel):
+    tx_id: str
+    occurred_at: datetime
+    op_type: WriteoffOrMovementType
+    location: Location | None = None      # для writeoff
+    source: Location | None = None        # для movement
+    destination: Location | None = None   # для movement
+    lines: list[GoodsLine] = Field(min_length=1)
+    comment: str | None = None
+    confidence: Confidence
+    raw_text: str
+
+
+class InventoryFact(BaseModel):
+    name: str
+    qty: float = Field(ge=0)  # 0 = товар закончился
+    unit: str
+
+
+class Inventory(BaseModel):
+    tx_id: str
+    occurred_at: datetime
+    location: Location
+    facts: list[InventoryFact] = Field(min_length=1)
+    confidence: Confidence
+    raw_text: str
+
+
+# === Запросы и уточнения ===
+
+class StockQuery(BaseModel):
+    product_query: str | None = None
+    location: Location | None = None
 
 
 class ReportPeriodType(StrEnum):
@@ -54,238 +164,67 @@ class ReportPeriodType(StrEnum):
     CUSTOM = "custom"
 
 
-# === Базовые сущности ===
-
-class Confidence(BaseModel):
-    text: float = Field(ge=0.0, le=1.0)
-    amount: float = Field(ge=0.0, le=1.0, default=1.0)
-    quantity: float = Field(ge=0.0, le=1.0, default=1.0)
-
-    @property
-    def critical(self) -> float:
-        return min(self.text, self.amount, self.quantity)
+class TopMetric(StrEnum):
+    REVENUE = "выручка"
+    PROFIT = "прибыль"
+    QUANTITY = "количество"
 
 
-class GoodsLine(BaseModel):
-    product: str
-    qty: float = Field(gt=0)
-    unit: str
-    price_per_unit_kopecks: int | None = None
-    comment: str | None = None
-
-
-# === Операции с одновременным движением денег и товаров ===
-
-class Sale(BaseModel):
-    occurred_at: datetime
-    amount_kopecks: int = Field(gt=0)
-    lines: list[GoodsLine] = Field(min_length=1)
-    counterparty: str | None = None
-    location: str | None = None
-    payment: PaymentMethod = PaymentMethod.UNKNOWN
-    confidence: Confidence
-    raw_text: str
-
-
-class Purchase(BaseModel):
-    occurred_at: datetime
-    amount_kopecks: int = Field(gt=0)
-    lines: list[GoodsLine] = Field(min_length=1)
-    supplier: str
-    location: str | None = None
-    payment: PaymentMethod = PaymentMethod.UNKNOWN
-    confidence: Confidence
-    raw_text: str
-
-
-class ReturnFromCustomer(BaseModel):
-    occurred_at: datetime
-    amount_kopecks: int = Field(gt=0)
-    lines: list[GoodsLine] = Field(min_length=1)
-    customer: str | None = None
-    location: str | None = None
-    payment: PaymentMethod = PaymentMethod.UNKNOWN
-    confidence: Confidence
-    raw_text: str
-
-
-class ReturnToSupplier(BaseModel):
-    occurred_at: datetime
-    amount_kopecks: int = Field(gt=0)
-    lines: list[GoodsLine] = Field(min_length=1)
-    supplier: str
-    location: str | None = None
-    payment: PaymentMethod = PaymentMethod.UNKNOWN
-    confidence: Confidence
-    raw_text: str
-
-
-# === Операции только с деньгами или только с товарами ===
-
-class Cashflow(BaseModel):
-    occurred_at: datetime
-    op_type: CashflowType
-    amount_kopecks: int = Field(gt=0)
-    category: ExpenseCategory
-    counterparty: str | None = None
-    location: str | None = None
-    payment: PaymentMethod = PaymentMethod.UNKNOWN
-    description: str
-    confidence: Confidence
-    raw_text: str
-
-
-class Writeoff(BaseModel):
-    occurred_at: datetime
-    lines: list[GoodsLine] = Field(min_length=1)
-    location: str
-    reason: str
-    confidence: Confidence
-    raw_text: str
-
-
-class Movement(BaseModel):
-    occurred_at: datetime
-    lines: list[GoodsLine] = Field(min_length=1)
-    from_location: str
-    to_location: str
-    confidence: Confidence
-    raw_text: str
-
-
-class InventoryAdjustment(BaseModel):
-    occurred_at: datetime
-    product: str
-    location: str
-    actual_qty: float = Field(ge=0)
-    unit: str
-    confidence: Confidence
-    raw_text: str
-
-
-# === Multi-ops ===
-
-class SalesBatch(BaseModel):
-    sales: list[Sale] = Field(min_length=2)
-    raw_text: str
-
-
-# === Запросы ===
-
-class StockQuery(BaseModel):
-    product: str | None = None
-    location: str | None = None
-
-
-class ReportPeriodRequest(BaseModel):
+class PeriodReportRequest(BaseModel):
     period_type: ReportPeriodType
     year: int | None = None
     month: int | None = Field(default=None, ge=1, le=12)
     quarter: int | None = Field(default=None, ge=1, le=4)
     relative: Literal["current", "previous", None] = None
+    location: Location | None = None
     top_metric: TopMetric = TopMetric.REVENUE
-    location_filter: str | None = None
     period_is_clear: bool
-
-
-# === Канонизация и правки ===
-
-class ProductCanonicalization(BaseModel):
-    decision: Literal["existing", "new"]
-    canon: str | None = None
-    new_canon: str | None = None
-    default_unit: str | None = None
-
-
-class LocationCanonicalization(BaseModel):
-    decision: Literal["existing", "new"]
-    canon: str | None = None
-    new_canon: str | None = None
-    location_type: Literal["магазин", "склад", None] = None
-
-
-class EditLastRequest(BaseModel):
-    field: Literal["amount", "qty", "counterparty", "category", "location", "payment", "description"]
-    new_value: str | int | float
-
-
-# === Уточнение ===
-
-IntentHint = Literal[
-    "sale", "purchase", "return_customer", "return_supplier",
-    "expense", "writeoff", "movement", "report", None,
-]
 
 
 class ClarificationNeeded(BaseModel):
     raw_text: str
     reason: str
     question: str
-    intent_hint: IntentHint = None
+    intent_hint: Literal["sale", "purchase", "return", "cashflow",
+                         "writeoff", "inventory", "report", None] = None
 
 
-# === Дискриминированный union ===
-
+# Дискриминированный union, который возвращает парсер
 ParsedCommand = (
-    Sale | Purchase | ReturnFromCustomer | ReturnToSupplier
-    | Cashflow | Writeoff | Movement | InventoryAdjustment
-    | SalesBatch
-    | StockQuery
-    | ReportPeriodRequest
-    | ProductCanonicalization | LocationCanonicalization
-    | EditLastRequest
-    | ClarificationNeeded
+    Sale | Purchase | Return | Cashflow | WriteoffOrMovement
+    | Inventory | StockQuery | PeriodReportRequest | ClarificationNeeded
 )
 
 
-# === Отчёты ===
+# === Остатки и отчёты (для read-side) ===
+
+class StockItem(BaseModel):
+    product: str
+    location: Location
+    qty: float
+    unit: str
+    avg_cost_kopecks: int = 0
+    updated_at: datetime
+
 
 class TopItem(BaseModel):
-    name: str
-    metric_value_kopecks: int | None = None
-    metric_qty: float | None = None
+    label: str
     revenue_kopecks: int = 0
-    cost_kopecks: int = 0
+    profit_kopecks: int = 0
+    quantity: float = 0
 
 
 class FinancialReport(BaseModel):
     period_label: str
-    sales_kopecks: int
-    sales_count: int
-    purchases_kopecks: int
-    expenses_kopecks: int
-    expenses_breakdown: dict[str, int] = Field(default_factory=dict)
-    returns_from_customers_kopecks: int = 0
-    returns_to_suppliers_kopecks: int = 0
-    deposits_kopecks: int = 0
-    withdrawals_kopecks: int = 0
-    top_products: list[TopItem] = Field(default_factory=list, max_length=3)
-    top_locations: list[TopItem] = Field(default_factory=list, max_length=5)
+    income_kopecks: int = 0
+    expense_kopecks: int = 0
+    income_count: int = 0
+    expense_count: int = 0
+    by_location: dict[Location, int] = Field(default_factory=dict)
+    top_products: list[TopItem] = Field(default_factory=list)
+    top_locations: list[TopItem] = Field(default_factory=list)
     top_metric: TopMetric = TopMetric.REVENUE
 
     @property
-    def cash_balance_kopecks(self) -> int:
-        return (
-            self.sales_kopecks
-            + self.returns_to_suppliers_kopecks
-            + self.deposits_kopecks
-            - self.purchases_kopecks
-            - self.expenses_kopecks
-            - self.returns_from_customers_kopecks
-            - self.withdrawals_kopecks
-        )
-
-
-class StockSnapshot(BaseModel):
-    product: str
-    unit: str
-    location: str
-    qty: float
-    avg_purchase_price_kopecks: int | None = None
-    updated_at: datetime
-
-
-class StockReport(BaseModel):
-    items: list[StockSnapshot]
-    product_filter: str | None = None
-    location_filter: str | None = None
+    def balance_kopecks(self) -> int:
+        return self.income_kopecks - self.expense_kopecks

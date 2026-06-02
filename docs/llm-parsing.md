@@ -1,50 +1,53 @@
-# LLM-парсинг: голос → структурированная операция
+# LLM-парсинг (GigaChat function calling)
 
-## 1. Зачем LLM, а не regex
+> Стек v2.1 — российский. Основной LLM: **GigaChat-Max** (Сбер) через `gigachat` Python SDK. Function calling. Fallback: `ClaudeParser` (через `LLM_BACKEND_FALLBACK=claude`) для edge case если GigaChat не справится.
+>
+> Tools упрощены до **8 штук** (в v2.0 было 14 под Claude). GigaChat менее зрелый в multi-tool сценариях, поэтому объединяем близкие операции в один tool с дискриминатором в поле.
 
-Голос свободный. Одна и та же продажа звучит как:
-- «Продал 10 листов ГКЛ за 5 тысяч наличными»
-- «На пять тыщ ушло, ГКЛ, десять листов, кэшем»
-- «10 листов гипсокартона ушло за пятёрку наличкой»
+## 1. Зачем function calling
 
-Regex не вытащит. Claude tool_use с типизированными инструментами вытаскивает надёжно.
+Голос Евгения: «Продал тридцать мешков цемента Стерлитамак Хайдел за восемнадцать тысяч наличными на Зинино». Никакая regex это не вытащит. GigaChat с function calling возвращает структурированный JSON: тип операции, товар, количество, единица, сумма, способ оплаты, точка, контрагент (null).
 
-## 2. Модель и режим
-- **Основная:** `claude-haiku-4-5-20251001` — быстро и дёшево, хватает для парсинга.
-- **Fallback** при `critical_confidence < 0.7`: повторный вызов на `claude-sonnet-4-6`.
-- **Режим:** `tool_choice = {"type": "any"}` — модель обязана вызвать один из инструментов.
-- **Prompt caching:** системный промпт + tool definitions кешируются (одинаковы между вызовами).
+## 2. Модели
 
-## 3. Инструменты (14 шт.)
+- **Основная:** `GigaChat-Max` — лучшее качество от Сбера, ~600-1500 ₽/мес при потоке Евгения.
+- **Fallback:** `GigaChat-Pro` если Max упал или low confidence (`min(text, amount, qty) < 0.7`).
+- **Кросс-backend fallback:** `ClaudeParser` через тот же интерфейс `LLMParser` (см. `src/llm/`). Переключение по `LLM_BACKEND=gigachat|claude`.
 
-### 3.1 `record_sale` — продажа товара
-Триггер: «продал», «продажа», «ушло Q товара за S», «отдал клиенту».
+## 3. Tools (8)
+
+Все tools возвращают `confidence: {text, amount, quantity}` (3 поля 0..1). `critical = min(text, amount, quantity)` — порог для UX-движка.
+
+### 3.1 `record_sale` — продажа товара покупателю
+Деньги (приход) + Товары (продажа) + Остатки (−) транзакционно через общий `tx_id`.
 
 ```json
 {
   "name": "record_sale",
-  "description": "Зафиксировать продажу товара покупателю. Пишет в три листа: Движение денег (приход), Движение товаров (продажа), Остатки (пересчёт).",
-  "input_schema": {
+  "description": "Зафиксировать продажу товара. Создаёт приход в Деньгах + выбытие в Товарах + пересчёт Остатков.",
+  "parameters": {
     "type": "object",
-    "required": ["amount_rub", "lines", "payment",
+    "required": ["amount_rub", "lines", "location", "payment",
                  "text_confidence", "amount_confidence", "quantity_confidence"],
     "properties": {
-      "amount_rub": {"type": "integer", "minimum": 1, "description": "Сумма продажи в рублях."},
+      "amount_rub": {"type": "integer", "description": "Общая сумма продажи в рублях."},
       "lines": {
-        "type": "array", "minItems": 1,
+        "type": "array",
+        "minItems": 1,
         "items": {
           "type": "object",
-          "required": ["product", "qty", "unit"],
+          "required": ["name", "qty", "unit"],
           "properties": {
-            "product": {"type": "string", "description": "Имя товара как услышано."},
+            "name": {"type": "string", "description": "Товар, как сказал пользователь."},
             "qty": {"type": "number", "exclusiveMinimum": 0},
-            "unit": {"type": "string", "description": "Из словаря или сырая (бот канонизирует)."}
+            "unit": {"type": "string"}
           }
         }
       },
-      "counterparty": {"type": ["string", "null"], "description": "Покупатель. Для розницы обычно null."},
-      "location": {"type": ["string", "null"], "description": "Точка продажи; null = дефолт из env."},
+      "location": {"type": "string", "enum": ["Магазин Зинино", "Магазин Кармалы"]},
+      "customer": {"type": ["string", "null"], "description": "Покупатель если назван (B2B-постоянник). null если разовый."},
       "payment": {"type": "string", "enum": ["наличные", "карта", "счёт", "не указано"]},
+      "comment": {"type": ["string", "null"]},
       "text_confidence": {"type": "number", "minimum": 0, "maximum": 1},
       "amount_confidence": {"type": "number", "minimum": 0, "maximum": 1},
       "quantity_confidence": {"type": "number", "minimum": 0, "maximum": 1}
@@ -53,103 +56,101 @@ Regex не вытащит. Claude tool_use с типизированными и�
 }
 ```
 
-### 3.2 `record_purchase` — закупка товара
-Триггер: «купил», «закупил», «получил от поставщика», «поступило от».
+### 3.2 `record_purchase` — закупка товара у поставщика
+Деньги (расход) + Товары (поступление) + Остатки (+) + пересчёт СВ-цены.
 
 ```json
 {
   "name": "record_purchase",
-  "description": "Зафиксировать закупку товара у поставщика. Пишет: Движение денег (расход), Движение товаров (поступление), Остатки (+Q, пересчёт СВ-цены).",
-  "input_schema": {
+  "description": "Зафиксировать закупку товара. Создаёт расход в Деньгах + поступление в Товарах + пересчёт Остатков и средневзвешенной цены.",
+  "parameters": {
     "type": "object",
-    "required": ["amount_rub", "lines", "supplier", "payment",
+    "required": ["amount_rub", "supplier", "lines", "destination", "payment",
                  "text_confidence", "amount_confidence", "quantity_confidence"],
     "properties": {
-      "amount_rub": {"type": "integer", "minimum": 1},
-      "lines": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/GoodsLine"}},
-      "supplier": {"type": "string", "description": "Поставщик — обязательно."},
-      "location": {"type": ["string", "null"], "description": "Куда поступило; null = дефолт ('склад')."},
+      "amount_rub": {"type": "integer"},
+      "supplier": {"type": "string", "description": "Поставщик (контрагент)."},
+      "lines": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "object",
+          "required": ["name", "qty", "unit"],
+          "properties": {
+            "name": {"type": "string"},
+            "qty": {"type": "number", "exclusiveMinimum": 0},
+            "unit": {"type": "string"},
+            "price_per_unit": {"type": ["number", "null"], "description": "Цена за ед. если названа отдельно. Иначе вычислим amount/qty."}
+          }
+        }
+      },
+      "destination": {"type": "string", "enum": ["Магазин Зинино", "Магазин Кармалы"]},
       "payment": {"type": "string", "enum": ["наличные", "карта", "счёт", "не указано"]},
-      "text_confidence": {"type": "number", "minimum": 0, "maximum": 1},
-      "amount_confidence": {"type": "number", "minimum": 0, "maximum": 1},
-      "quantity_confidence": {"type": "number", "minimum": 0, "maximum": 1}
+      "comment": {"type": ["string", "null"]},
+      "text_confidence": {"type": "number"},
+      "amount_confidence": {"type": "number"},
+      "quantity_confidence": {"type": "number"}
     }
   }
 }
 ```
 
-### 3.3 `record_return_from_customer` — возврат от покупателя
-Триггер: «возврат», «вернули», «отдал назад клиенту».
+### 3.3 `record_return` — возврат (от покупателя или поставщику)
+Объединяет два сценария через поле `direction`.
 
 ```json
 {
-  "name": "record_return_from_customer",
-  "description": "Возврат товара от покупателя. Пишет: Движение денег (расход 'возврат покупателю'), Движение товаров (возврат +Q), Остатки.",
-  "input_schema": {
+  "name": "record_return",
+  "description": "Зафиксировать возврат. direction='from_customer' — покупатель вернул товар, мы вернули деньги. direction='to_supplier' — мы вернули товар поставщику, он вернул деньги.",
+  "parameters": {
     "type": "object",
-    "required": ["amount_rub", "lines", "payment",
+    "required": ["direction", "amount_rub", "counterparty", "lines", "location",
                  "text_confidence", "amount_confidence", "quantity_confidence"],
     "properties": {
-      "amount_rub": {"type": "integer", "minimum": 1},
-      "lines": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/GoodsLine"}},
-      "customer": {"type": ["string", "null"]},
-      "location": {"type": ["string", "null"]},
+      "direction": {"type": "string", "enum": ["from_customer", "to_supplier"]},
+      "amount_rub": {"type": "integer"},
+      "counterparty": {"type": "string"},
+      "lines": {"type": "array", "minItems": 1, "items": {
+        "type": "object", "required": ["name", "qty", "unit"],
+        "properties": {"name": {"type": "string"}, "qty": {"type": "number"}, "unit": {"type": "string"}}
+      }},
+      "location": {"type": "string", "enum": ["Магазин Зинино", "Магазин Кармалы"]},
       "payment": {"type": "string", "enum": ["наличные", "карта", "счёт", "не указано"]},
-      "text_confidence": {"type": "number"}, "amount_confidence": {"type": "number"}, "quantity_confidence": {"type": "number"}
+      "comment": {"type": ["string", "null"]},
+      "text_confidence": {"type": "number"},
+      "amount_confidence": {"type": "number"},
+      "quantity_confidence": {"type": "number"}
     }
   }
 }
 ```
 
-### 3.4 `record_return_to_supplier` — возврат поставщику
-Триггер: «вернул поставщику», «отдал назад X», «возврат на склад X».
-
-```json
-{
-  "name": "record_return_to_supplier",
-  "description": "Возврат товара поставщику. Пишет: Движение денег (приход 'возврат поставщика'), Движение товаров (возврат поставщику −Q), Остатки.",
-  "input_schema": {
-    "type": "object",
-    "required": ["amount_rub", "lines", "supplier", "payment",
-                 "text_confidence", "amount_confidence", "quantity_confidence"],
-    "properties": {
-      "amount_rub": {"type": "integer", "minimum": 1},
-      "lines": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/GoodsLine"}},
-      "supplier": {"type": "string"},
-      "location": {"type": ["string", "null"]},
-      "payment": {"type": "string", "enum": ["наличные", "карта", "счёт", "не указано"]},
-      "text_confidence": {"type": "number"}, "amount_confidence": {"type": "number"}, "quantity_confidence": {"type": "number"}
-    }
-  }
-}
-```
-
-### 3.5 `record_cashflow` — деньги без товара
-Триггер: «заплатил за аренду», «зарплата», «внёс в кассу», «снял из кассы», «прочий приход».
+### 3.4 `record_cashflow` — приход/расход без товара
+Аренда, зарплата, налоги, внесения, изъятия — всё через один tool с типом.
 
 ```json
 {
   "name": "record_cashflow",
-  "description": "Денежная операция без движения товара: расход (аренда/зарплата/коммуналка/реклама и т.п.), прочий приход, внесение или изъятие из кассы. Только Движение денег.",
-  "input_schema": {
+  "description": "Финансовая операция без движения товара: аренда, зарплата, налоги, внесение из своих, изъятие на личное, прочий приход.",
+  "parameters": {
     "type": "object",
-    "required": ["op_type", "amount_rub", "category", "description", "payment",
+    "required": ["op_type", "amount_rub", "description", "location",
                  "text_confidence", "amount_confidence"],
     "properties": {
       "op_type": {"type": "string", "enum": ["расход", "прочий приход", "внесение", "изъятие"]},
-      "amount_rub": {"type": "integer", "minimum": 1},
+      "amount_rub": {"type": "integer"},
+      "description": {"type": "string", "description": "Дословный фрагмент о сути."},
       "category": {
-        "type": "string",
-        "enum": ["закупка товара", "аренда помещения", "зарплата", "коммунальные / связь",
-                 "реклама / маркетинг", "транспорт / доставка", "налоги / банк / эквайринг",
-                 "оборудование / ремонт", "прочее",
-                 "внесение", "изъятие", "прочий приход"],
-        "description": "Для 'расход' — реальная категория; для остальных типов — имя типа."
+        "type": ["string", "null"],
+        "enum": [
+          "аренда помещения", "зарплата", "коммунальные / связь",
+          "реклама / маркетинг", "транспорт / доставка",
+          "налоги / банк / эквайринг", "оборудование / ремонт", "прочее", null
+        ]
       },
       "counterparty": {"type": ["string", "null"]},
-      "location": {"type": ["string", "null"]},
+      "location": {"type": ["string", "null"], "enum": ["Магазин Зинино", "Магазин Кармалы", null]},
       "payment": {"type": "string", "enum": ["наличные", "карта", "счёт", "не указано"]},
-      "description": {"type": "string"},
       "text_confidence": {"type": "number"},
       "amount_confidence": {"type": "number"}
     }
@@ -157,21 +158,26 @@ Regex не вытащит. Claude tool_use с типизированными и�
 }
 ```
 
-### 3.6 `record_writeoff` — списание товара
-Триггер: «списал», «бой», «недостача», «истёк срок».
+### 3.5 `record_writeoff_or_movement` — списание или перемещение между точками
+Только Товары + Остатки. Деньги не трогаются.
 
 ```json
 {
-  "name": "record_writeoff",
-  "description": "Списание товара (брак, недостача). Только Движение товаров и Остатки. Деньги не трогаются.",
-  "input_schema": {
+  "name": "record_writeoff_or_movement",
+  "description": "Только товарная операция без денег. op_type='списание' — брак/недостача (минус с точки). op_type='перемещение' — между точками (минус с source, плюс на destination).",
+  "parameters": {
     "type": "object",
-    "required": ["lines", "location", "reason",
-                 "text_confidence", "quantity_confidence"],
+    "required": ["op_type", "lines", "text_confidence", "quantity_confidence"],
     "properties": {
-      "lines": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/GoodsLine"}},
-      "location": {"type": "string", "description": "Откуда списываем."},
-      "reason": {"type": "string", "description": "бой, недостача, истёк срок и т.п."},
+      "op_type": {"type": "string", "enum": ["списание", "перемещение"]},
+      "location": {"type": ["string", "null"], "enum": ["Магазин Зинино", "Магазин Кармалы", null]},
+      "source": {"type": ["string", "null"], "enum": ["Магазин Зинино", "Магазин Кармалы", null], "description": "Только для перемещения — откуда."},
+      "destination": {"type": ["string", "null"], "enum": ["Магазин Зинино", "Магазин Кармалы", null], "description": "Только для перемещения — куда."},
+      "lines": {"type": "array", "minItems": 1, "items": {
+        "type": "object", "required": ["name", "qty", "unit"],
+        "properties": {"name": {"type": "string"}, "qty": {"type": "number"}, "unit": {"type": "string"}}
+      }},
+      "comment": {"type": ["string", "null"], "description": "Причина списания: «бой», «недостача», «просрочка»."},
       "text_confidence": {"type": "number"},
       "quantity_confidence": {"type": "number"}
     }
@@ -179,21 +185,22 @@ Regex не вытащит. Claude tool_use с типизированными и�
 }
 ```
 
-### 3.7 `record_movement` — перемещение между точками
-Триггер: «перевёз», «переместил», «перекинул со склада в магазин».
+### 3.6 `record_inventory` — инвентаризация (корректировка факта)
+Бот сравнит с расчётным остатком, разницу запишет как корректировку.
 
 ```json
 {
-  "name": "record_movement",
-  "description": "Перемещение товара между точками/складами. Пишет две строки в Движение товаров и обновляет Остатки на обеих точках. Деньги не трогаются.",
-  "input_schema": {
+  "name": "record_inventory",
+  "description": "Зафиксировать факт инвентаризации: для каждой позиции — фактическое количество на точке. Бот сравнит с расчётным и запишет корректировку.",
+  "parameters": {
     "type": "object",
-    "required": ["lines", "from_location", "to_location",
-                 "text_confidence", "quantity_confidence"],
+    "required": ["location", "facts", "text_confidence", "quantity_confidence"],
     "properties": {
-      "lines": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/GoodsLine"}},
-      "from_location": {"type": "string"},
-      "to_location": {"type": "string"},
+      "location": {"type": "string", "enum": ["Магазин Зинино", "Магазин Кармалы"]},
+      "facts": {"type": "array", "minItems": 1, "items": {
+        "type": "object", "required": ["name", "qty", "unit"],
+        "properties": {"name": {"type": "string"}, "qty": {"type": "number", "minimum": 0}, "unit": {"type": "string"}}
+      }},
       "text_confidence": {"type": "number"},
       "quantity_confidence": {"type": "number"}
     }
@@ -201,533 +208,362 @@ Regex не вытащит. Claude tool_use с типизированными и�
 }
 ```
 
-### 3.8 `record_inventory_adjustment` — корректировка факта
-Триггер: «инвентаризация», «по факту», ответ в `/inventory` диалоге.
+### 3.7 `query_or_report` — запрос данных (остатки или отчёт за период)
+Объединяет «сколько X на складе?» и «отчёт за май».
 
 ```json
 {
-  "name": "record_inventory_adjustment",
-  "description": "Корректировка остатка товара по факту инвентаризации. Пишет в Движение товаров (тип 'инвентаризация') и Остатки.",
-  "input_schema": {
+  "name": "query_or_report",
+  "description": "Запрос данных. type='stock' — спросить остатки. type='period_report' — финансовый отчёт за период.",
+  "parameters": {
     "type": "object",
-    "required": ["product", "location", "actual_qty", "unit",
-                 "text_confidence", "quantity_confidence"],
+    "required": ["type"],
     "properties": {
-      "product": {"type": "string"},
-      "location": {"type": "string"},
-      "actual_qty": {"type": "number", "minimum": 0},
-      "unit": {"type": "string"},
-      "text_confidence": {"type": "number"},
-      "quantity_confidence": {"type": "number"}
-    }
-  }
-}
-```
-
-### 3.9 `query_stock` — запрос остатков
-Триггер: «сколько», «остатки», «что на складе», «есть ли X».
-
-```json
-{
-  "name": "query_stock",
-  "description": "Запросить остатки товаров. Бот читает лист Остатки и отвечает.",
-  "input_schema": {
-    "type": "object",
-    "properties": {
-      "product": {"type": ["string", "null"], "description": "null = все товары"},
-      "location": {"type": ["string", "null"], "description": "null = все точки"}
-    }
-  }
-}
-```
-
-### 3.10 `resolve_report_period` — парсинг периода для отчёта
-Триггер: «отчёт за», «сводка за», `/report`.
-
-```json
-{
-  "name": "resolve_report_period",
-  "description": "Извлечь период отчёта и опц. метрику топа.",
-  "input_schema": {
-    "type": "object",
-    "required": ["period_type", "period_is_clear"],
-    "properties": {
-      "period_type": {"type": "string", "enum": ["day", "month", "quarter", "year", "custom"]},
+      "type": {"type": "string", "enum": ["stock", "period_report"]},
+      "product_query": {"type": ["string", "null"], "description": "Для stock: фильтр по товару (фрагмент названия)."},
+      "location": {"type": ["string", "null"], "enum": ["Магазин Зинино", "Магазин Кармалы", null]},
+      "period_type": {"type": ["string", "null"], "enum": ["day", "month", "quarter", "year", "custom", null]},
       "year": {"type": ["integer", "null"]},
       "month": {"type": ["integer", "null"], "minimum": 1, "maximum": 12},
       "quarter": {"type": ["integer", "null"], "minimum": 1, "maximum": 4},
       "relative": {"type": ["string", "null"], "enum": ["current", "previous", null]},
-      "top_metric": {"type": "string", "enum": ["по выручке", "по прибыли", "по количеству"],
-                     "description": "Дефолт 'по выручке'."},
-      "location_filter": {"type": ["string", "null"], "description": "Отчёт по конкретной точке."},
-      "period_is_clear": {"type": "boolean"}
+      "top_metric": {"type": "string", "enum": ["выручка", "прибыль", "количество"], "default": "выручка"},
+      "period_is_clear": {"type": "boolean", "description": "Для period_report: false если не уточнили текущий или конкретный."}
     }
   }
 }
 ```
 
-### 3.11 `canonicalize_product` — выбор канона товара
-Используется только внутри диалога канонизации (бот спросил «это X или новый?»).
+### 3.8 `request_clarification` — нужно уточнение
+Когда непонятно или нет обязательных полей. Запись не делается.
 
-```json
-{
-  "name": "canonicalize_product",
-  "description": "Решить, относится ли произнесённое имя товара к существующему канону или это новый товар.",
-  "input_schema": {
-    "type": "object",
-    "required": ["decision"],
-    "properties": {
-      "decision": {"type": "string", "enum": ["existing", "new"]},
-      "canon": {"type": ["string", "null"], "description": "Если existing — выбранный канон."},
-      "new_canon": {"type": ["string", "null"], "description": "Если new — каноническое имя для нового."},
-      "default_unit": {"type": ["string", "null"], "description": "Для new — единица по умолчанию."}
-    }
-  }
-}
-```
-
-### 3.12 `canonicalize_location` — выбор канона точки
-Аналогично §3.11.
-
-```json
-{
-  "name": "canonicalize_location",
-  "input_schema": {
-    "type": "object",
-    "required": ["decision"],
-    "properties": {
-      "decision": {"type": "string", "enum": ["existing", "new"]},
-      "canon": {"type": ["string", "null"]},
-      "new_canon": {"type": ["string", "null"]},
-      "location_type": {"type": ["string", "null"], "enum": ["магазин", "склад", null]}
-    }
-  }
-}
-```
-
-### 3.13 `apply_edit` — правка последней операции
-```json
-{
-  "name": "apply_edit",
-  "description": "Применить точечную правку к последней операции пользователя.",
-  "input_schema": {
-    "type": "object",
-    "required": ["field", "new_value"],
-    "properties": {
-      "field": {"type": "string", "enum": ["amount", "qty", "counterparty", "category", "location", "payment", "description"]},
-      "new_value": {"type": ["string", "integer", "number"]}
-    }
-  }
-}
-```
-
-### 3.14 `request_clarification` — нужно уточнение
 ```json
 {
   "name": "request_clarification",
-  "description": "Использовать когда смысл фразы непонятен или критичные поля отсутствуют. Запись не делается.",
-  "input_schema": {
+  "description": "Использовать когда смысл фразы непонятен или критичные поля отсутствуют (нет суммы, нет товара/количества). Запись не выполняется.",
+  "parameters": {
     "type": "object",
     "required": ["reason", "question", "intent_hint"],
     "properties": {
-      "reason": {"type": "string"},
-      "question": {"type": "string"},
-      "intent_hint": {
-        "type": ["string", "null"],
-        "enum": ["sale", "purchase", "return_customer", "return_supplier",
-                 "expense", "writeoff", "movement", "report", null]
-      }
+      "reason": {"type": "string", "description": "Что именно неясно (для лога)."},
+      "question": {"type": "string", "description": "Вопрос пользователю (точный текст)."},
+      "intent_hint": {"type": ["string", "null"], "enum": ["sale", "purchase", "return", "cashflow", "writeoff", "inventory", "report", null]}
     }
   }
 }
 ```
 
-### 3.15 Shared definition `GoodsLine`
-```json
-{
-  "GoodsLine": {
-    "type": "object",
-    "required": ["product", "qty", "unit"],
-    "properties": {
-      "product": {"type": "string"},
-      "qty": {"type": "number", "exclusiveMinimum": 0},
-      "unit": {"type": "string"},
-      "comment": {"type": ["string", "null"]}
-    }
-  }
-}
-```
+## 4. Системный промпт (для GigaChat)
 
-## 4. Системный промпт
+GigaChat лучше работает с короткими директивными промптами без длинных абстракций. Промпт прячем в системное сообщение, обновляем редко (cache-friendly).
 
 ```
-Ты — модуль извлечения данных для голосового MAX-бота розничного магазина стройматериалов.
+Ты — модуль парсинга голосовых команд для бота учёта в строительном магазине.
+Бизнес: магазин «Магазин Зинино» + магазин «Магазин Кармалы», ассортимент — пиломатериалы, цемент, метизы, отделка.
 
-ВХОД: текст, расшифрованный из голосового сообщения владельца магазина.
-ВЫХОД: ровно один tool_use вызов. Никакого свободного текста.
+ВЫВОД: вызов ровно одного из инструментов. НИКАКОГО свободного текста.
 
-ВЫБОР ИНСТРУМЕНТА (по интенту):
+ВЫБОР ИНСТРУМЕНТА:
+- Продажа товара (есть товар + сумма) → record_sale
+- Закупка товара у поставщика → record_purchase
+- Возврат от покупателя / поставщику → record_return
+- Деньги без товара (аренда, зарплата, налоги, внесение, изъятие) → record_cashflow
+- Списание (брак, недостача) или перемещение между точками → record_writeoff_or_movement
+- Инвентаризация (сверка факта) → record_inventory
+- Запрос остатков или отчёта → query_or_report
+- Непонятно / нет критичных полей → request_clarification
 
-ТОВАР + ДЕНЬГИ (всегда вместе):
-- "продал X за Y / клиенту отдал Z" → record_sale
-- "купил у поставщика P товар X за Y / получил от P, оплатил" → record_purchase
-- "возврат: вернули товар X, отдал Y денег / клиент сдал" → record_return_from_customer
-- "вернул поставщику P товар X, получил Y денег" → record_return_to_supplier
-
-ТОЛЬКО ДЕНЬГИ:
-- "заплатил аренду / зарплату / коммуналку / интернет / рекламу / налоги / банк / эквайринг / транспорт" → record_cashflow с op_type='расход'
-- "внёс в кассу / положил в кассу / пополнил" → record_cashflow с op_type='внесение'
-- "снял из кассы / забрал на личные / изъял" → record_cashflow с op_type='изъятие'
-- "прочий приход / пришло (не от продажи)" → record_cashflow с op_type='прочий приход'
-
-ТОЛЬКО ТОВАР:
-- "списал X / бой / недостача / истёк срок" → record_writeoff
-- "перевёз / переместил / перекинул с X на Y" → record_movement
-- "по факту X штук / инвентаризация X" → record_inventory_adjustment
-
-ЗАПРОСЫ:
-- "сколько X / остатки / что на складе / есть ли X" → query_stock
-- "отчёт за период / сводка за месяц" → resolve_report_period
-
-ДИАЛОГИ (только когда бот ждёт ответ):
-- ответ в диалоге канонизации товара → canonicalize_product
-- ответ в диалоге канонизации точки → canonicalize_location
-- правка («не 15, а 50», «измени сумму на 50») → apply_edit
-
-ЕСЛИ НЕПОНЯТНО / НЕТ КРИТИЧНЫХ ПОЛЕЙ:
-- request_clarification
-
-КРИТИЧНЫЕ ПОЛЯ (без них — clarification, не угадывать):
-- Продажа: сумма И товар И количество.
-- Закупка: сумма И товар И количество И поставщик.
-- Возврат покупателю: сумма И товар И количество.
-- Возврат поставщику: сумма И товар И количество И поставщик.
-- Расход (cashflow): сумма И категория.
-- Списание: товар И количество И причина (хотя бы "не указано").
-- Перемещение: товар И количество И обе точки.
-- Инвентаризация: товар И фактическое количество.
+КРИТИЧНЫЕ ПОЛЯ:
+- Sale, purchase, return: сумма И товар И количество.
+- Cashflow: тип И сумма.
+- Writeoff/movement: товар И количество (для movement ещё source И destination).
+- Inventory: location И минимум один товар с количеством.
+Если нет — request_clarification.
 
 ЧИСЛИТЕЛЬНЫЕ:
-- "пятнадцать тысяч" = 15000, "полторы тысячи" = 1500, "восемь с половиной тысяч" = 8500.
-- "тыщ"/"к"/"тыс" — тысячи. "лям"/"миллион" — миллионы. "пятёрка" = 5000 (в контексте денег).
-- Двусмысленные числа (двадцать/двести, пятнадцать/пятьдесят) — выбирай вероятный вариант, но снижай amount_confidence или quantity_confidence до 0.5–0.65.
+- «пятнадцать тысяч» = 15000, «полторы тысячи» = 1500, «восемь с половиной тысяч» = 8500.
+- «тридцать мешков» qty=30.
+- «полтора куба» qty=1.5.
+- Двусмысленность (двадцать/двести, пятнадцать/пятьдесят) → снижай amount_confidence/quantity_confidence до 0.5–0.7, но делай лучшую догадку.
+
+ТОЧКИ (всегда одна из двух или null):
+- «Зинино», «магазин Зинино», «на Зинино» → "Магазин Зинино"
+- «Кармалы», «магазин Кармалы», «на Кармалы» → "Магазин Кармалы"
+- Не упомянуто и не подразумевается → null (бот сам выберет дефолт или спросит).
 
 ТОВАРЫ:
-- Сохраняй имя ТАК КАК СКАЗАЛ ПОЛЬЗОВАТЕЛЬ ("ГКЛ", "гипсокартон 12,5", "клей плиточный"). Канонизацию делает бот сам, не ты.
-- НЕ объединяй разные товары в один lines-элемент. Каждая позиция — свой элемент массива.
+- Сохраняй как сказал пользователь (без нормализации) — канонизацию делает бот сам после.
+- Пример: «доска 50 на 150 на 6», «цемент 25 кг», «гипсокартон 12,5».
 
-ЕДИНИЦЫ ИЗМЕРЕНИЯ:
-- Из словаря: шт, м, м², м³, кг, т, л, мешок, лист, рулон, упаковка, пачка, комплект, ведро, банка, тюбик, бутылка, коробка, пакет, пог. м.
-- Если не услышал — пытайся из контекста ("ГКЛ — лист", "цемент — мешок", "краска — банка/литр").
-- Если совсем непонятно — ставь "шт" или сырое слово.
+ЕДИНИЦЫ ИЗМЕРЕНИЯ (10 канонических):
+шт., м2, м3, м.п. (погонный метр), рул (рулон), уп. (упаковка), кг, меш. (мешок), л. (литр), м.
+Если в речи другая форма («штук», «мешков», «квадратов») — пиши каноническую.
 
-КАТЕГОРИИ (для record_cashflow с op_type='расход'):
-- "аренда / помещение / офис" → "аренда помещения"
-- "зарплата / зп / премия / продавцу / грузчику" → "зарплата"
-- "коммуналка / свет / вода / интернет / связь / телефон" → "коммунальные / связь"
-- "реклама / маркетинг / таргет / соцсети / визитки" → "реклама / маркетинг"
-- "доставка / транспорт / бензин / парковка / такси" → "транспорт / доставка"
-- "налоги / банк / эквайринг / комиссия" → "налоги / банк / эквайринг"
-- "оборудование / ремонт / стеллажи / тележка / весы" → "оборудование / ремонт"
-- иначе → "прочее"
-
-ТОЧКИ:
-- Сохраняй как сказал ("на Ленина", "склад", "магазин"). Канонизация бот сам.
-- Если "склад" без уточнения — это название точки "склад".
-- Если не упомянуто — оставляй null. Бот подставит DEFAULT_LOCATION.
-
-ОПИСАНИЕ:
-- Дословный фрагмент о сути, без вводных слов.
-- Не суммаризируй, не сокращай по смыслу.
+КАТЕГОРИИ РАСХОДА (для record_cashflow с op_type=расход):
+аренда помещения, зарплата, коммунальные / связь, реклама / маркетинг,
+транспорт / доставка, налоги / банк / эквайринг, оборудование / ремонт, прочее.
 
 CONFIDENCE:
-- text_confidence: насколько уверен в распознанном Whisper тексте. 0.95+ если связно, 0.5–0.7 при подозрениях.
-- amount_confidence: 0.9+ если число прозвучало однозначно, 0.5–0.7 при путанице.
-- quantity_confidence: то же для количества товара.
+- text_confidence: насколько уверен в распознанном тексте (Whisper/GigaAM).
+- amount_confidence: уверенность в сумме.
+- quantity_confidence: уверенность в количестве.
+Высокий 0.9+, средний 0.7-0.9, низкий <0.7.
 
-ДЕФОЛТЫ ГОДА В ОТЧЁТАХ:
-- "за январь" без года → текущий год.
-- Если получившаяся дата в будущем (в январе спросили "за декабрь") → прошлый год.
+ДЕФОЛТ ГОДА в отчётах:
+- «за январь» без года → текущий год.
+- Если получится будущая дата → прошлый год.
 
-ОТСУТСТВУЮЩИЕ ПОЛЯ:
-- counterparty, location — если не упомянуты, ставь null. НЕ выдумывай.
-- payment — если не упомянут, "не указано".
-
-ПРИМЕРЫ:
-- "Продал 10 листов ГКЛ за 5 тысяч наличными" → record_sale
-- "Купил у Петровича 100 мешков штукатурки за 25 тысяч безналом" → record_purchase
-- "Списал 3 мешка штукатурки бой" → record_writeoff
-- "Перевёз 20 листов ГКЛ со склада в магазин" → record_movement
-- "Заплатил аренду 80 тысяч на счёт" → record_cashflow расход
-- "Внёс в кассу 50 тысяч" → record_cashflow внесение
-- "Сколько ГКЛ на складе?" → query_stock
-- "Отчёт за месяц" → resolve_report_period
-- "Не пять, а пятьдесят" → apply_edit
-- "Запиши штукатурку 100 мешков" (нет суммы и поставщика для закупки) → request_clarification
+Не выдумывай поля. Если не сказано — null или omit.
 ```
 
 ## 5. Примеры
 
-### 5.1 Розничная продажа (S1)
-**Input:** «Продал 10 листов ГКЛ за 5 тысяч, наличными»
+### 5.1 Продажа
+**Input:** «Продал тридцать мешков цемента Стерлитамак Хайдел за восемнадцать тысяч наличными на Зинино»
 
+**Tool:**
 ```json
 {
   "tool": "record_sale",
   "input": {
-    "amount_rub": 5000,
-    "lines": [{"product": "ГКЛ", "qty": 10, "unit": "лист"}],
-    "counterparty": null,
-    "location": null,
+    "amount_rub": 18000,
+    "lines": [{"name": "цемент Стерлитамак Хайдел", "qty": 30, "unit": "меш."}],
+    "location": "Магазин Зинино",
+    "customer": null,
     "payment": "наличные",
     "text_confidence": 0.95,
+    "amount_confidence": 0.93,
+    "quantity_confidence": 0.95
+  }
+}
+```
+
+### 5.2 Закупка
+**Input:** «Получил от Петровича сто мешков штукатурки за двадцать пять тысяч по счёту, на Кармалы»
+
+**Tool:**
+```json
+{
+  "tool": "record_purchase",
+  "input": {
+    "amount_rub": 25000,
+    "supplier": "Петрович",
+    "lines": [{"name": "штукатурка", "qty": 100, "unit": "меш."}],
+    "destination": "Магазин Кармалы",
+    "payment": "счёт",
+    "text_confidence": 0.92,
+    "amount_confidence": 0.94,
+    "quantity_confidence": 0.93
+  }
+}
+```
+
+### 5.3 Возврат от покупателя
+**Input:** «Возврат от Иванова, вернул два листа гипсокартона, отдал восемьсот рублей наличными, Зинино»
+
+**Tool:**
+```json
+{
+  "tool": "record_return",
+  "input": {
+    "direction": "from_customer",
+    "amount_rub": 800,
+    "counterparty": "Иванов",
+    "lines": [{"name": "гипсокартон", "qty": 2, "unit": "лист"}],
+    "location": "Магазин Зинино",
+    "payment": "наличные",
+    "text_confidence": 0.93,
     "amount_confidence": 0.95,
     "quantity_confidence": 0.95
   }
 }
 ```
 
-### 5.2 Оптовая продажа (S2)
-**Input:** «Бригаде Иванова отгрузил 50 мешков цемента за 30 тысяч на счёт»
+### 5.4 Расход (аренда)
+**Input:** «Заплатил аренду восемьдесят тысяч по счёту за Зинино»
 
-```json
-{
-  "tool": "record_sale",
-  "input": {
-    "amount_rub": 30000,
-    "lines": [{"product": "цемент", "qty": 50, "unit": "мешок"}],
-    "counterparty": "бригада Иванова",
-    "location": null,
-    "payment": "счёт",
-    "text_confidence": 0.94, "amount_confidence": 0.93, "quantity_confidence": 0.95
-  }
-}
-```
-
-### 5.3 Закупка (S3)
-**Input:** «Получил от Петровича 100 мешков штукатурки за 25 тысяч, безналом»
-
-```json
-{
-  "tool": "record_purchase",
-  "input": {
-    "amount_rub": 25000,
-    "lines": [{"product": "штукатурка", "qty": 100, "unit": "мешок"}],
-    "supplier": "Петрович",
-    "location": null,
-    "payment": "счёт",
-    "text_confidence": 0.96, "amount_confidence": 0.95, "quantity_confidence": 0.96
-  }
-}
-```
-
-### 5.4 Возврат от покупателя (S4)
-**Input:** «Возврат: вернули 2 листа ГКЛ, отдал тысячу наличными»
-
-```json
-{
-  "tool": "record_return_from_customer",
-  "input": {
-    "amount_rub": 1000,
-    "lines": [{"product": "ГКЛ", "qty": 2, "unit": "лист"}],
-    "customer": null,
-    "location": null,
-    "payment": "наличные",
-    "text_confidence": 0.93, "amount_confidence": 0.94, "quantity_confidence": 0.95
-  }
-}
-```
-
-### 5.5 Возврат поставщику (S5)
-**Input:** «Вернул Петровичу 10 мешков штукатурки, получил 2500 на счёт»
-
-```json
-{
-  "tool": "record_return_to_supplier",
-  "input": {
-    "amount_rub": 2500,
-    "lines": [{"product": "штукатурка", "qty": 10, "unit": "мешок"}],
-    "supplier": "Петрович",
-    "location": null,
-    "payment": "счёт",
-    "text_confidence": 0.95, "amount_confidence": 0.93, "quantity_confidence": 0.95
-  }
-}
-```
-
-### 5.6 Списание (S6)
-**Input:** «Списал 3 мешка штукатурки, бой»
-
-```json
-{
-  "tool": "record_writeoff",
-  "input": {
-    "lines": [{"product": "штукатурка", "qty": 3, "unit": "мешок"}],
-    "location": null,
-    "reason": "бой",
-    "text_confidence": 0.97, "quantity_confidence": 0.95
-  }
-}
-```
-
-### 5.7 Расход без товара (S7)
-**Input:** «Заплатил за аренду 80 тысяч на счёт»
-
+**Tool:**
 ```json
 {
   "tool": "record_cashflow",
   "input": {
     "op_type": "расход",
     "amount_rub": 80000,
+    "description": "аренда",
     "category": "аренда помещения",
     "counterparty": null,
-    "location": null,
+    "location": "Магазин Зинино",
     "payment": "счёт",
-    "description": "аренда",
-    "text_confidence": 0.96, "amount_confidence": 0.95
+    "text_confidence": 0.96,
+    "amount_confidence": 0.97
   }
 }
 ```
 
-### 5.8 Внесение в кассу (S8)
-**Input:** «Внёс в кассу 50 тысяч своих»
+### 5.5 Списание
+**Input:** «Списал три мешка штукатурки на Зинино, бой»
 
+**Tool:**
 ```json
 {
-  "tool": "record_cashflow",
+  "tool": "record_writeoff_or_movement",
   "input": {
-    "op_type": "внесение",
-    "amount_rub": 50000,
-    "category": "внесение",
-    "counterparty": "владелец",
-    "location": null,
-    "payment": "наличные",
-    "description": "пополнение кассы из личных",
-    "text_confidence": 0.97, "amount_confidence": 0.95
-  }
-}
-```
-
-### 5.9 Перемещение (S9)
-**Input:** «Перевёз 20 листов ГКЛ со склада на магазин на Ленина»
-
-```json
-{
-  "tool": "record_movement",
-  "input": {
-    "lines": [{"product": "ГКЛ", "qty": 20, "unit": "лист"}],
-    "from_location": "склад",
-    "to_location": "магазин на Ленина",
-    "text_confidence": 0.94, "quantity_confidence": 0.95
-  }
-}
-```
-
-### 5.10 Запрос остатков (S10)
-**Input:** «Сколько ГКЛ на складе?»
-
-```json
-{
-  "tool": "query_stock",
-  "input": {"product": "ГКЛ", "location": "склад"}
-}
-```
-
-### 5.11 Инвентаризация (S11)
-**Input (в диалоге `/inventory`):** «Сорок пять»
-
-```json
-{
-  "tool": "record_inventory_adjustment",
-  "input": {
-    "product": "ГКЛ 12,5",
-    "location": "склад",
-    "actual_qty": 45,
-    "unit": "лист",
-    "text_confidence": 0.95, "quantity_confidence": 0.95
-  }
-}
-```
-
-### 5.12 Multi-ops продажа (S12)
-**Input:** «Сегодня продал: цемент 30 мешков за 18 тысяч, ГКЛ 10 листов за 5 тысяч, всё наличными»
-
-В MVP это **две** последовательные `record_sale` (бот сам разобьёт). Альтернатива — `record_sales_batch` (см. data-model §2.4) если LLM однозначно понимает что это батч.
-
-### 5.13 Двусмысленная сумма → низкий amount_confidence (E)
-**Input:** «Продал ГКЛ десять листов за двести наличными»
-
-```json
-{
-  "tool": "record_sale",
-  "input": {
-    "amount_rub": 200,
-    "lines": [{"product": "ГКЛ", "qty": 10, "unit": "лист"}],
-    "counterparty": null,
-    "location": null,
-    "payment": "наличные",
-    "text_confidence": 0.85,
-    "amount_confidence": 0.5,
+    "op_type": "списание",
+    "location": "Магазин Зинино",
+    "lines": [{"name": "штукатурка", "qty": 3, "unit": "меш."}],
+    "comment": "бой",
+    "text_confidence": 0.94,
     "quantity_confidence": 0.95
   }
 }
 ```
-> Бот покажет карточку: «Я понял: 200 ₽. Если 200 000 — поправь».
 
-### 5.14 Отчёт с метрикой и фильтром
-**Input:** «Отчёт за май по прибыли по магазину на Ленина»
+### 5.6 Перемещение
+**Input:** «Перевёз двадцать листов гипсокартона из Зинино в Кармалы»
 
+**Tool:**
 ```json
 {
-  "tool": "resolve_report_period",
+  "tool": "record_writeoff_or_movement",
   "input": {
+    "op_type": "перемещение",
+    "source": "Магазин Зинино",
+    "destination": "Магазин Кармалы",
+    "lines": [{"name": "гипсокартон", "qty": 20, "unit": "лист"}],
+    "text_confidence": 0.93,
+    "quantity_confidence": 0.95
+  }
+}
+```
+
+### 5.7 Инвентаризация (батч)
+**Input:** «Инвентаризация Зинино: цемент Стерлитамак сорок семь мешков, доска пятьдесят на сто пятьдесят двенадцать штук, гипсокартон двенадцать с половиной восемнадцать листов»
+
+**Tool:**
+```json
+{
+  "tool": "record_inventory",
+  "input": {
+    "location": "Магазин Зинино",
+    "facts": [
+      {"name": "цемент Стерлитамак", "qty": 47, "unit": "меш."},
+      {"name": "доска 50х150", "qty": 12, "unit": "шт."},
+      {"name": "гипсокартон 12,5", "qty": 18, "unit": "лист"}
+    ],
+    "text_confidence": 0.88,
+    "quantity_confidence": 0.9
+  }
+}
+```
+
+### 5.8 Запрос остатков
+**Input:** «Сколько цемента в Зинино?»
+
+**Tool:**
+```json
+{
+  "tool": "query_or_report",
+  "input": {
+    "type": "stock",
+    "product_query": "цемент",
+    "location": "Магазин Зинино"
+  }
+}
+```
+
+### 5.9 Отчёт за месяц с метрикой
+**Input:** «Отчёт за май по прибыли»
+
+**Tool:**
+```json
+{
+  "tool": "query_or_report",
+  "input": {
+    "type": "period_report",
     "period_type": "month",
     "month": 5,
     "year": 2026,
-    "top_metric": "по прибыли",
-    "location_filter": "магазин на Ленина",
+    "top_metric": "прибыль",
     "period_is_clear": true
   }
 }
 ```
 
-### 5.15 Канонизация товара (новый)
-**Input (после вопроса бота «Не нашёл «жидкие гвозди». Завести как новый товар? Единица — банка?»):** «Да, банка»
+### 5.10 Уточнение периода
+**Input:** «Сделай отчёт за месяц»
 
+**Tool:**
 ```json
 {
-  "tool": "canonicalize_product",
+  "tool": "query_or_report",
   "input": {
-    "decision": "new",
-    "new_canon": "жидкие гвозди",
-    "default_unit": "банка"
+    "type": "period_report",
+    "period_type": "month",
+    "top_metric": "выручка",
+    "period_is_clear": false
   }
 }
 ```
+→ Бот: «За какой месяц — текущий или конкретный?»
 
-### 5.16 Уточнение (нет суммы для закупки)
-**Input:** «Получил от Петровича штукатурку»
+### 5.11 Уточнение (нет суммы)
+**Input:** «Продал тридцать мешков цемента»
 
+**Tool:**
 ```json
 {
   "tool": "request_clarification",
   "input": {
-    "reason": "не указана сумма и количество",
-    "question": "На какую сумму и сколько мешков?",
-    "intent_hint": "purchase"
+    "reason": "продажа без указания суммы",
+    "question": "За сколько продал 30 мешков цемента?",
+    "intent_hint": "sale"
   }
 }
 ```
 
-## 6. Стоимость и латентность
+### 5.12 Двусмысленная сумма
+**Input:** «Продал доску за двести рублей»
 
-Грубая оценка на одну операцию (Haiku):
-- Input: ~2200 токенов (системный промпт + 14 tool definitions + контекст диалога) — почти весь кешируется.
-- Output: ~150 токенов.
-- ~1.2¢ за вызов.
+**Tool:**
+```json
+{
+  "tool": "record_sale",
+  "input": {
+    "amount_rub": 200,
+    "lines": [{"name": "доска", "qty": 1, "unit": "шт."}],
+    "location": "Магазин Зинино",
+    "payment": "не указано",
+    "text_confidence": 0.85,
+    "amount_confidence": 0.55,
+    "quantity_confidence": 0.7
+  }
+}
+```
+→ Бот показывает карточку: «Я понял 200 ₽ за 1 доску. Если 200 000 — поправь».
 
-При 80 операциях/день — ~$1/день, ~$30/мес. С fallback на Sonnet (~15%) — +$5/мес.
+## 6. LLM-абстракция в коде
 
-Whisper: $0.006/мин. 10 сек = $0.001. 80 операций × 10 сек = $0.08/день = $2.4/мес.
+`src/llm/base.py`:
+```python
+class LLMParser(Protocol):
+    async def parse(self, text: str, system_prompt: str) -> ParsedCommand: ...
+```
 
-**Итого внешние API: ~$30–40/мес.** Бюджет настраивается через `MONTHLY_API_BUDGET_USD`.
+`src/llm/gigachat_parser.py` — основная реализация через `gigachat` SDK.
+`src/llm/claude_parser.py` — fallback через `anthropic` SDK для случая если GigaChat не справляется.
+`src/llm/factory.py` — `get_parser()` читает `LLM_BACKEND` из env.
+
+Переключение `GigaChat ↔ Claude` — одна переменная в `.env`. Системный промпт и tool definitions хранятся в `src/llm/prompts.py` и `src/llm/tools.py` — общие для обоих backend.
+
+## 7. Стоимость
+
+**GigaAM** (STT) — 0 ₽ (локально на VPS, бесплатно после загрузки модели ~1 ГБ).
+
+**GigaChat-Max** (LLM) на потоке Евгения (~50-100 операций/день):
+- Input: ~1500 токенов (системный промпт + tools + текст) — кешируется.
+- Output: ~100 токенов.
+- Тариф Сбера: токенозависимый, ~600-1500 ₽/мес.
+
+**Итого LLM+STT: 600-1500 ₽/мес** (в десятки раз дешевле, чем Whisper+Claude).
+
+Бюджет владельца через `MONTHLY_API_BUDGET_RUB` — при превышении предупреждение в чат.
