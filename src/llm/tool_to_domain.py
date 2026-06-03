@@ -56,10 +56,49 @@ def _lines(raw_lines: list[dict[str, Any]]) -> list[GoodsLine]:
     ]
 
 
+_INVALID_LOC_MARKERS = {"<unknown>", "unknown", "null", "none", "не указано", "?", "—", "-"}
+
+
 def _location(value: Any) -> Location | None:
-    if value is None or value == "":
+    if value is None:
         return None
-    return Location(value)
+    s = str(value).strip()
+    if not s or s.lower() in _INVALID_LOC_MARKERS:
+        return None
+    return Location(s)
+
+
+def _ensure_location(value: Any, field_name: str, raw_text: str) -> Location | ClarificationNeeded:
+    """Для обязательных полей location: если значение пустое/невалидное —
+    возвращаем ClarificationNeeded вместо валидной Location.
+
+    Вызывающий код должен проверить isinstance(result, ClarificationNeeded)
+    и вернуть его как итог парсинга вместо построения операции.
+    """
+    if value is None:
+        return ClarificationNeeded(
+            raw_text=raw_text,
+            reason=f"Не указана {field_name}.",
+            question=f"На какую точку: Магазин Зинино или Магазин Кармалы?",
+            intent_hint=None,
+        )
+    s = str(value).strip()
+    if not s or s.lower() in _INVALID_LOC_MARKERS:
+        return ClarificationNeeded(
+            raw_text=raw_text,
+            reason=f"Не указана {field_name}.",
+            question=f"На какую точку: Магазин Зинино или Магазин Кармалы?",
+            intent_hint=None,
+        )
+    try:
+        return Location(s)
+    except ValueError:
+        return ClarificationNeeded(
+            raw_text=raw_text,
+            reason=f"Точка «{s}» не из списка.",
+            question="На какую точку: Магазин Зинино или Магазин Кармалы?",
+            intent_hint=None,
+        )
 
 
 def _payment(value: Any) -> PaymentMethod:
@@ -77,12 +116,15 @@ def build_command_from_tool_call(
     a = tool_args  # для краткости
 
     if tool_name == "record_sale":
+        loc = _ensure_location(a.get("location"), "точка продажи", raw_text)
+        if isinstance(loc, ClarificationNeeded):
+            return loc
         return Sale(
             tx_id=tx_id,
             occurred_at=occurred_at,
             amount_kopecks=int(a["amount_rub"]) * 100,
             lines=_lines(a["lines"]),
-            location=Location(a["location"]),
+            location=loc,
             customer=a.get("customer"),
             payment=_payment(a.get("payment")),
             comment=a.get("comment"),
@@ -91,13 +133,16 @@ def build_command_from_tool_call(
         )
 
     if tool_name == "record_purchase":
+        dst = _ensure_location(a.get("destination"), "точка приёмки", raw_text)
+        if isinstance(dst, ClarificationNeeded):
+            return dst
         return Purchase(
             tx_id=tx_id,
             occurred_at=occurred_at,
             amount_kopecks=int(a["amount_rub"]) * 100,
             supplier=str(a["supplier"]),
             lines=_lines(a["lines"]),
-            destination=Location(a["destination"]),
+            destination=dst,
             payment=_payment(a.get("payment")),
             comment=a.get("comment"),
             confidence=_conf(a, with_amount=True, with_qty=True),
@@ -105,6 +150,9 @@ def build_command_from_tool_call(
         )
 
     if tool_name == "record_return":
+        loc = _ensure_location(a.get("location"), "точка возврата", raw_text)
+        if isinstance(loc, ClarificationNeeded):
+            return loc
         return Return(
             tx_id=tx_id,
             direction=ReturnDirection(a["direction"]),
@@ -112,7 +160,7 @@ def build_command_from_tool_call(
             amount_kopecks=int(a["amount_rub"]) * 100,
             counterparty=str(a["counterparty"]),
             lines=_lines(a["lines"]),
-            location=Location(a["location"]),
+            location=loc,
             payment=_payment(a.get("payment")),
             comment=a.get("comment"),
             confidence=_conf(a, with_amount=True, with_qty=True),
@@ -168,6 +216,9 @@ def build_command_from_tool_call(
         )
 
     if tool_name == "record_inventory":
+        loc = _ensure_location(a.get("location"), "точка инвентаризации", raw_text)
+        if isinstance(loc, ClarificationNeeded):
+            return loc
         facts = [
             InventoryFact(name=str(f["name"]), qty=float(f["qty"]), unit=str(f["unit"]))
             for f in a["facts"]
@@ -175,7 +226,7 @@ def build_command_from_tool_call(
         return Inventory(
             tx_id=tx_id,
             occurred_at=occurred_at,
-            location=Location(a["location"]),
+            location=loc,
             facts=facts,
             confidence=_conf(a, with_qty=True),
             raw_text=raw_text,
