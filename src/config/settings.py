@@ -15,8 +15,17 @@ class Settings(BaseSettings):
     gigachat_model: str = Field(default="GigaChat-Max")
     gigachat_verify_ssl: bool = Field(default=False)
     gigachat_timeout_sec: int = Field(default=30, ge=5, le=300)
-    llm_backend: str = Field(default="gigachat", description="gigachat | claude")
-    llm_backend_fallback: str = Field(default="", description="claude или пусто")
+    llm_backend: str = Field(default="gigachat", description="gigachat | claude | openrouter")
+    llm_backend_fallback: str = Field(default="", description="claude / gigachat / openrouter или пусто")
+
+    # === OpenRouter (доступ к Claude/GPT/Gemini единым API) ===
+    openrouter_api_key: str = Field(default="")
+    openrouter_model: str = Field(
+        default="anthropic/claude-haiku-4.5",
+        description="anthropic/claude-haiku-4.5 (дёшево, быстро) | anthropic/claude-sonnet-4.6 (точнее) | openai/gpt-5",
+    )
+    openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1")
+    openrouter_timeout_sec: int = Field(default=30, ge=5, le=300)
 
     # === STT ===
     stt_engine: str = Field(default="gigaam", description="gigaam | whisper")

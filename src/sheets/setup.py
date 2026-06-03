@@ -127,6 +127,36 @@ def populate_categories(ws) -> int:
     return len(DEFAULT_CATEGORIES)
 
 
+def append_product_to_sheet(spreadsheet, canon: str, default_unit: str = "") -> bool:
+    """Добавить один новый канон в лист «Товары» если его там ещё нет.
+
+    Возвращает True если добавили, False если уже был. Тихо игнорирует
+    ошибки чтения (например, лист пустой / Sheets 5xx) — не критично для
+    основной записи операции.
+    """
+    try:
+        ws = spreadsheet.worksheet(SHEET_PRODUCTS)
+    except Exception:
+        log.exception("append_product: лист «Товары» недоступен")
+        return False
+    try:
+        existing = {row[0].strip().lower() for row in ws.get_all_values()[1:] if row and row[0].strip()}
+    except Exception:
+        log.exception("append_product: чтение листа упало")
+        return False
+    if canon.strip().lower() in existing:
+        return False
+    try:
+        ws.append_row(
+            [canon, "", default_unit or "", "", "да"],
+            value_input_option="USER_ENTERED",
+        )
+        return True
+    except Exception:
+        log.exception("append_product: запись %r упала", canon)
+        return False
+
+
 def populate_products(ws, import_path: Path) -> int:
     """Импортировать прайс Евгения. Дедуп по канону (в прайсе один товар в 2 точках)."""
     existing = ws.get_all_values()[1:]

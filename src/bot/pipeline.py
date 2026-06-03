@@ -93,6 +93,14 @@ async def process_parsed(
     # === Чтения (не пишут в Sheets) ===
 
     if isinstance(parsed, ClarificationNeeded):
+        # Сохраняем оригинальный текст — следующее сообщение пользователя
+        # склеится с ним при повторном парсинге (см. handlers._process_text).
+        ctx.dialog.set(
+            chat_id,
+            intent="awaiting_clarification",
+            partial_data={"original_text": parsed.raw_text},
+            ttl_minutes=settings.dialog_state_ttl_minutes,
+        )
         return parsed.question
 
     if isinstance(parsed, StockQuery):
@@ -170,9 +178,29 @@ async def process_parsed(
         return CARD_DEDUP_MSG.format(when=when, previous=dedup_match["operation_summary"])
 
     if decision.step == DialogStep.CANONICALIZE:
-        # Найдём кандидатов и сохраним диалог
+        # Считаем сколько товаров реально требуют канонизации (нет точного матча).
+        # Если больше одного — мульти-канон сейчас не поддерживается, просим
+        # разбить на отдельные сообщения (иначе один выбор подменит ВСЕ товары
+        # на один и тот же канон — это серьёзный баг учёта).
+        unknown_lines = [
+            line for line in parsed.lines
+            if not ctx.catalog.lookup(line.name, top_k=1, min_score=0.99)
+        ]
+        if len(unknown_lines) > 1:
+            names = ", ".join(f"«{l.name}»" for l in unknown_lines)
+            return (
+                f"В этой операции несколько новых товаров ({names}). "
+                f"Пока что бот умеет канонизировать по одному за раз — пришли каждый товар отдельным сообщением.\n\n"
+                f"Например:\n"
+                + "\n".join(
+                    f"  • Купил у X {l.qty} {l.unit} {l.name} за Y тысяч на Z"
+                    for l in unknown_lines[:3]
+                )
+            )
+
+        # Один товар на канонизацию — стандартный путь
         candidates = []
-        for line in parsed.lines:
+        for line in unknown_lines:
             matches = ctx.catalog.lookup(line.name, top_k=3, min_score=0.5)
             candidates.extend([m.canon for m in matches])
         ctx.dialog.set(
@@ -188,8 +216,15 @@ async def process_parsed(
         # Формируем сообщение
         if candidates:
             options = "\n".join(f"  {i}. {c}" for i, c in enumerate(candidates, 1))
-            return f"Не нашёл точное совпадение в каталоге. Похожие:\n{options}\n\nОтветь номером или «новый»."
-        return "Не нашёл в каталоге. Завести как новый товар? Ответь «да» или «нет»."
+            return (
+                f"Не нашёл точное совпадение в каталоге. Похожие:\n{options}\n\n"
+                f"Ответь: номер (1-{len(candidates)}) если подходит, «новый» для добавления как есть, "
+                "или пришли полное имя нового товара (например: «Фанера сорт 1/1 6мм»)."
+            )
+        return (
+            "Не нашёл в каталоге. Пришли «новый» чтобы записать как есть, "
+            "или полное имя нового товара."
+        )
 
     if decision.step == DialogStep.WRITE:
         return await _do_write(ctx, parsed, chat_id, user_id, message_id, semhash)

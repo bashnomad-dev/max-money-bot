@@ -373,6 +373,16 @@ def make_handlers(client, ctx: AppContext) -> dict[str, Any]:
             await _process_canon_response(message, text, state)
             return
 
+        if intent == "awaiting_clarification":
+            # Склеиваем оригинальный текст + новый ответ → парсим заново.
+            # Это даёт LLM полный контекст (например: «Купил у Леруа 50 мешков
+            # цемента» + «30000» → парсится как Purchase с amount=30000).
+            original = state["partial_data"].get("original_text", "")
+            combined = f"{original}. {text}".strip()
+            ctx.dialog.clear(chat_id)
+            await _process_text(message, combined)
+            return
+
         # Неизвестный intent — сбросим
         ctx.dialog.clear(chat_id)
         await client.reply(message, CANCEL_DONE_MSG)
@@ -451,14 +461,19 @@ def make_handlers(client, ctx: AppContext) -> dict[str, Any]:
         user_id = _user_id(message)
         partial = state["partial_data"]
         candidates = partial.get("candidates", [])
-        lower = text.lower().strip()
+        raw = text.strip()
+        lower = raw.lower()
 
-        async def _write_with_canon(canon_name: str | None) -> None:
-            """canon_name=None → пишем как есть (новый товар), иначе подменяем все строки.
+        async def _write_with_canon(canon_name: str | None, is_existing: bool) -> None:
+            """canon_name=None → пишем под сырым именем (line.name) как новый товар.
+            canon_name + is_existing=True → подменяем на существующий канон из каталога.
+            canon_name + is_existing=False → пользователь дал ПОЛНОЕ имя нового товара.
 
-            После подмены канона прогоняем через полный pipeline (process_parsed),
-            чтобы СРАБОТАЛИ оставшиеся UX-проверки: карточка большой суммы,
-            дедуп, confidence. Канонизация уже не сработает — line.name уже в каталоге.
+            После подмены — полный pipeline (process_parsed), сработают оставшиеся
+            UX-проверки (карточка большой суммы, дедуп, confidence).
+            Новые товары добавляются в каталог (in-memory + Sheets «Товары»),
+            чтобы при следующей операции не было канонизации заново и не плодились
+            дубликаты в Остатках.
             """
             try:
                 parsed = rehydrate_parsed(partial["parsed_class"], partial["parsed_json"])
@@ -467,36 +482,63 @@ def make_handlers(client, ctx: AppContext) -> dict[str, Any]:
                 ctx.dialog.clear(chat_id)
                 await client.reply(message, "Не получилось восстановить операцию. Продиктуй заново.")
                 return
+
+            new_canons_to_persist: list[tuple[str, str]] = []  # (canon, unit)
             if hasattr(parsed, "lines"):
                 for line in parsed.lines:
                     matches = ctx.catalog.lookup(line.name, top_k=1, min_score=0.99)
                     if matches:
                         continue
                     if canon_name:
-                        # выбор номера — подменяем сырое имя на канон из каталога
                         line.name = canon_name
-                    # «новый» или подмена — в любом случае помечаем имя как
-                    # уже известное (in-memory), чтобы DialogEngine не зациклился
-                    # на повторной канонизации в этом же pipeline.
+                    # помечаем как известный in-memory
                     ctx.dialog_engine.add_known_product(line.name)
+                    # для новых товаров — добавить в каталог и persist
+                    if not is_existing:
+                        added = ctx.catalog.add(line.name, default_unit=line.unit)
+                        if added:
+                            new_canons_to_persist.append((line.name, line.unit))
+
+            # persist в Sheets «Товары» (best-effort, не блокируем запись операции)
+            if new_canons_to_persist:
+                try:
+                    from src.sheets.setup import append_product_to_sheet
+                    ss = _open_spreadsheet(ctx, chat_id)
+                    if ss is not None:
+                        for canon, unit in new_canons_to_persist:
+                            append_product_to_sheet(ss, canon, unit)
+                except Exception:
+                    log.exception("Не получилось persist новый товар в Sheets «Товары»")
+
             ctx.dialog.clear(chat_id)
             result = await process_parsed(
                 ctx, parsed, chat_id=chat_id, user_id=user_id, message_id=_message_id(message),
             )
             await _send(message, result)
 
+        # 1. «новый» — товар как есть (сырое имя из распознанной фразы)
         if lower == "новый":
-            await _write_with_canon(None)
+            await _write_with_canon(None, is_existing=False)
             return
-        try:
-            idx = int(lower)
-        except ValueError:
-            await client.reply(message, "Не понял. Ответь номером (1, 2, 3) или «новый».")
+
+        # 2. Число — выбор из кандидатов
+        if raw.isdigit():
+            idx = int(raw)
+            if 1 <= idx <= len(candidates):
+                await _write_with_canon(candidates[idx - 1], is_existing=True)
+                return
+            await client.reply(message, f"Номер должен быть от 1 до {len(candidates)}.")
             return
-        if 1 <= idx <= len(candidates):
-            await _write_with_canon(candidates[idx - 1])
+
+        # 3. Текст ≥3 символов — полное имя нового товара
+        if len(raw) >= 3:
+            await _write_with_canon(raw, is_existing=False)
             return
-        await client.reply(message, f"Номер должен быть от 1 до {len(candidates)}.")
+
+        await client.reply(
+            message,
+            "Не понял. Ответь номером (1, 2, 3), «новый» или напиши полное имя нового товара.",
+        )
 
     return {
         "start": handle_start,

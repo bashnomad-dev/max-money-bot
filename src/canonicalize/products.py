@@ -70,6 +70,23 @@ class ProductCatalog:
     def size(self) -> int:
         return len(self._entries)
 
+    def add(self, canon: str, default_unit: str | None = None) -> bool:
+        """Добавить новый канон в каталог in-memory. True если новый, False если был.
+
+        Сравнение case-insensitive по `canon`. Не персистится автоматически —
+        для записи в Sheets «Товары» см. src.sheets.setup.append_product.
+        """
+        if not canon:
+            return False
+        canon_lower = canon.lower()
+        for e in self._entries:
+            if e.canon.lower() == canon_lower:
+                return False
+        entry = CatalogEntry(canon=canon, default_unit=default_unit)
+        self._entries.append(entry)
+        self._search_index.append((canon_lower, entry))
+        return True
+
     def lookup(self, query: str, top_k: int = 3, min_score: float = 0.5) -> list[ProductMatch]:
         """Найти топ-K похожих канонических имён. Score 0..1."""
         if not query or not self._entries:
