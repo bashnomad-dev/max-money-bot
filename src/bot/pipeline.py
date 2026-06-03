@@ -209,7 +209,21 @@ async def _do_write(
     semhash: str | None,
 ) -> str:
     """Физическая запись в Sheets + регистрация в operations_log + dedup."""
-    spreadsheet = _open_spreadsheet_for_chat(ctx, chat_id)
+    # open_sheet может упасть с APIError 5xx если Google временно недоступен
+    try:
+        spreadsheet = _open_spreadsheet_for_chat(ctx, chat_id)
+    except Exception as e:  # noqa: BLE001
+        log.exception("Sheets open failed")
+        ctx.pending_writes.enqueue(
+            chat_id,
+            {
+                "parsed_class": type(parsed).__name__,
+                "parsed_json": parsed.model_dump(mode='json'),
+            },
+            error=f"open: {e}",
+        )
+        return SHEETS_DOWN_MSG
+
     if spreadsheet is None:
         return NEED_LINK_MSG
 

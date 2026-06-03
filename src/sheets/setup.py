@@ -36,9 +36,16 @@ class SheetsSetupError(Exception):
 
 
 def open_sheet(sheet_id: str):
-    """Открыть таблицу по ID. Возвращает gspread.Spreadsheet."""
+    """Открыть таблицу по ID. Возвращает gspread.Spreadsheet.
+
+    На транзиентные 5xx (Google периодически отдаёт 503) — короткий retry
+    с backoff 1с → 3с.
+    """
+    import time as _time
+
     import gspread  # type: ignore
     from google.oauth2.service_account import Credentials  # type: ignore
+    from gspread.exceptions import APIError  # type: ignore
 
     creds = Credentials.from_service_account_file(
         settings.google_service_account_json,
@@ -48,7 +55,21 @@ def open_sheet(sheet_id: str):
         ],
     )
     client = gspread.authorize(creds)
-    return client.open_by_key(sheet_id)
+
+    last_exc: Exception | None = None
+    for pause in (0, 1, 3):
+        if pause:
+            _time.sleep(pause)
+        try:
+            return client.open_by_key(sheet_id)
+        except APIError as e:
+            last_exc = e
+            code = getattr(getattr(e, "response", None), "status_code", 0)
+            if code in (500, 502, 503, 504):
+                continue
+            raise
+    assert last_exc is not None
+    raise last_exc
 
 
 def ensure_worksheet(spreadsheet, spec: SheetSpec) -> tuple[object, bool]:

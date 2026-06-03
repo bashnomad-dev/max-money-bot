@@ -69,6 +69,16 @@ class DialogEngine:
         if known_locations is not None:
             self._known_locations = known_locations
 
+    def add_known_product(self, name: str) -> None:
+        """In-memory отметка: товар подтверждён (через выбор канона или «новый»).
+
+        Нужно чтобы повторный прогон через decide() в том же pipeline не зацикливал
+        канонизацию. Не персистится в SQLite — при рестарте бота сбросится, и
+        новые товары снова потребуют подтверждения (на одну сессию).
+        """
+        if name:
+            self._known_products.add(name.lower())
+
     def decide(self, op: Any, existing_dedup_match: dict | None = None) -> DialogResult:
         """Определить, что делать с разобранной командой."""
         # 1. Уточнения и запросы — отдельные ветки

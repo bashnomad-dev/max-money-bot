@@ -454,7 +454,12 @@ def make_handlers(client, ctx: AppContext) -> dict[str, Any]:
         lower = text.lower().strip()
 
         async def _write_with_canon(canon_name: str | None) -> None:
-            """canon_name=None → пишем как есть (новый товар), иначе подменяем все строки."""
+            """canon_name=None → пишем как есть (новый товар), иначе подменяем все строки.
+
+            После подмены канона прогоняем через полный pipeline (process_parsed),
+            чтобы СРАБОТАЛИ оставшиеся UX-проверки: карточка большой суммы,
+            дедуп, confidence. Канонизация уже не сработает — line.name уже в каталоге.
+            """
             try:
                 parsed = rehydrate_parsed(partial["parsed_class"], partial["parsed_json"])
             except Exception:
@@ -462,14 +467,20 @@ def make_handlers(client, ctx: AppContext) -> dict[str, Any]:
                 ctx.dialog.clear(chat_id)
                 await client.reply(message, "Не получилось восстановить операцию. Продиктуй заново.")
                 return
-            if canon_name and hasattr(parsed, "lines"):
-                # подменяем только товары без точного матча в каталоге
+            if hasattr(parsed, "lines"):
                 for line in parsed.lines:
                     matches = ctx.catalog.lookup(line.name, top_k=1, min_score=0.99)
-                    if not matches:
+                    if matches:
+                        continue
+                    if canon_name:
+                        # выбор номера — подменяем сырое имя на канон из каталога
                         line.name = canon_name
+                    # «новый» или подмена — в любом случае помечаем имя как
+                    # уже известное (in-memory), чтобы DialogEngine не зациклился
+                    # на повторной канонизации в этом же pipeline.
+                    ctx.dialog_engine.add_known_product(line.name)
             ctx.dialog.clear(chat_id)
-            result = await write_rehydrated(
+            result = await process_parsed(
                 ctx, parsed, chat_id=chat_id, user_id=user_id, message_id=_message_id(message),
             )
             await _send(message, result)
