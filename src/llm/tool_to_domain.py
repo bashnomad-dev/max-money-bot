@@ -136,13 +136,31 @@ def build_command_from_tool_call(
         )
 
     if tool_name == "record_writeoff_or_movement":
+        op_type = WriteoffOrMovementType(a["op_type"])
+        src = _location(a.get("source"))
+        dst = _location(a.get("destination"))
+        loc = _location(a.get("location"))
+        # Перемещение: source и destination обязательны. Если модель не дала их,
+        # но дала "location" — этого недостаточно, нужно переспросить.
+        if op_type == WriteoffOrMovementType.MOVEMENT:
+            if not src or not dst:
+                return ClarificationNeeded(
+                    raw_text=raw_text,
+                    reason="Для перемещения нужна точка-источник и точка-приёмник.",
+                    question="Откуда и куда перемещаешь? Например: «переместил X с Зинино на Кармалы».",
+                    intent_hint="writeoff",
+                )
+        # Списание: достаточно location (или source как fallback).
+        elif op_type == WriteoffOrMovementType.WRITEOFF:
+            if not loc and src:
+                loc = src
         return WriteoffOrMovement(
             tx_id=tx_id,
             occurred_at=occurred_at,
-            op_type=WriteoffOrMovementType(a["op_type"]),
-            location=_location(a.get("location")),
-            source=_location(a.get("source")),
-            destination=_location(a.get("destination")),
+            op_type=op_type,
+            location=loc,
+            source=src,
+            destination=dst,
             lines=_lines(a["lines"]),
             comment=a.get("comment"),
             confidence=_conf(a, with_qty=True),

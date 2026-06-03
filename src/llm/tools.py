@@ -122,7 +122,12 @@ TOOLS = [
     },
     {
         "name": "record_writeoff_or_movement",
-        "description": "Товарная операция без денег. op_type='списание' — брак/недостача. op_type='перемещение' — между точками.",
+        "description": (
+            "Товарная операция без денег. "
+            "op_type='списание' — брак/недостача (укажи location). "
+            "op_type='перемещение' — между точками (ОБЯЗАТЕЛЬНО заполни source И destination, "
+            "не используй location для перемещения)."
+        ),
         "parameters": {
             "type": "object",
             "required": ["op_type", "lines", "text_confidence", "quantity_confidence"],
