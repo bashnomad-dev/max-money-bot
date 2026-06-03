@@ -39,6 +39,16 @@ class MoneyRow:
         return self.op_type in EXPENSE_OPS
 
 
+def pretty_location(loc: str) -> str:
+    """В отчётах вместо «не указано» / пусто показываем «Общие» — для cashflow
+    без привязки к конкретной точке (зарплата, аренда, налоги и т.п.).
+    """
+    s = (loc or "").strip()
+    if not s or s.lower() == "не указано":
+        return "Общие"
+    return s
+
+
 @dataclass
 class GoodsAggRow:
     """Минимальные поля «Движения товаров» для агрегатов отчётов."""

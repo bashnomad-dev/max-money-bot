@@ -13,6 +13,7 @@ from src.reports._common import (
     fmt_rub,
     fmt_signed_rub,
     period_bounds,
+    pretty_location,
     read_goods_rows_for_reports,
     read_money_rows,
 )
@@ -64,16 +65,15 @@ def build_period_report(
 
     by_loc_net: dict[str, int] = defaultdict(int)
     for r in money_rows:
+        loc = pretty_location(r.location)
         if r.is_income:
             rep.income_rub += r.amount_rub
             rep.income_count += 1
-            if r.location:
-                by_loc_net[r.location] += r.amount_rub
+            by_loc_net[loc] += r.amount_rub
         elif r.is_expense:
             rep.expense_rub += r.amount_rub
             rep.expense_count += 1
-            if r.location:
-                by_loc_net[r.location] -= r.amount_rub
+            by_loc_net[loc] -= r.amount_rub
     rep.by_location_net = dict(sorted(by_loc_net.items(), key=lambda kv: -kv[1]))
 
     # Топ-3: по выручке / прибыли / количеству
@@ -86,24 +86,41 @@ def _build_top(
     money_rows: list[MoneyRow],
     metric: str,
 ) -> list[tuple[str, int, int, float]]:
-    sales_tx = {r.tx_id for r in money_rows if r.op_type == "продажа"}
-    purchase_tx = {r.tx_id for r in money_rows if r.op_type == "закупка"}
+    # Сумма по «Движение денег» для каждой продажи (по tx_id).
+    # Используется как fallback когда LLM не указал цену за единицу в строке
+    # «Движение товаров» — тогда выручка делится между lines пропорционально qty.
+    sale_amount_by_tx: dict[str, float] = {}
+    for r in money_rows:
+        if r.op_type == "продажа":
+            sale_amount_by_tx[r.tx_id] = float(r.amount_rub)
 
-    # revenue: сумма за позиции в продажах (цена × qty), либо amount пропорционально
-    # profit: revenue минус себестоимость (price_per_unit_rub из продажи = СВ-цена на момент)
-    # quantity: суммарное qty в продажах
+    # Суммарный qty продажи по tx_id (для пропорционального распределения).
+    sale_total_qty_by_tx: dict[str, float] = defaultdict(float)
+    for g in goods_rows:
+        if g.op_type == "продажа" and g.tx_id in sale_amount_by_tx:
+            sale_total_qty_by_tx[g.tx_id] += g.qty
+
     aggregate: dict[str, dict[str, float]] = defaultdict(
         lambda: {"revenue": 0.0, "cost": 0.0, "qty": 0.0}
     )
     for g in goods_rows:
-        if g.op_type == "продажа" and g.tx_id in sales_tx:
-            # Если есть цена за единицу — используем как розничную цену реализации
-            line_revenue = (g.price_per_unit_rub or 0) * g.qty
-            aggregate[g.product]["revenue"] += line_revenue
-            aggregate[g.product]["qty"] += g.qty
-            # Себестоимость для прибыли: используем ту же цену за единицу как СВ-цену
-            # (при штатной работе для продаж пишется СВ-цена; для прибыли это упрощение)
-            aggregate[g.product]["cost"] += line_revenue  # пока 0 прибыли по умолчанию
+        if g.op_type != "продажа" or g.tx_id not in sale_amount_by_tx:
+            continue
+        # 1) явная цена за единицу из строки товаров
+        if g.price_per_unit_rub:
+            line_revenue = float(g.price_per_unit_rub) * g.qty
+        # 2) fallback: доля от общей суммы продажи пропорционально qty
+        else:
+            total_qty = sale_total_qty_by_tx.get(g.tx_id, 0)
+            if total_qty > 0:
+                line_revenue = sale_amount_by_tx[g.tx_id] * (g.qty / total_qty)
+            else:
+                line_revenue = 0.0
+        aggregate[g.product]["revenue"] += line_revenue
+        aggregate[g.product]["qty"] += g.qty
+        # Себестоимость для прибыли — TODO: брать СВ-цену из остатков на момент продажи.
+        # Пока 0 → прибыль = выручка (визуально лучше, чем 0; пользователь видит порядок).
+        aggregate[g.product]["cost"] += 0.0
 
     if metric == "выручка":
         sort_key = lambda kv: -kv[1]["revenue"]

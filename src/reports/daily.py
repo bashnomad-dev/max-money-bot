@@ -13,6 +13,7 @@ from src.reports._common import (
     filter_money_by_period,
     fmt_rub,
     fmt_signed_rub,
+    pretty_location,
     read_goods_rows_for_reports,
     read_money_rows,
 )
@@ -51,27 +52,46 @@ def build_daily_report(
     by_loc_net: dict[str, int] = defaultdict(int)
 
     for r in money_today:
+        loc = pretty_location(r.location)
         if r.is_income:
             rep.income_rub += r.amount_rub
             rep.income_count += 1
-            if r.location:
-                by_loc_net[r.location] += r.amount_rub
+            by_loc_net[loc] += r.amount_rub
         elif r.is_expense:
             rep.expense_rub += r.amount_rub
             rep.expense_count += 1
-            if r.location:
-                by_loc_net[r.location] -= r.amount_rub
+            by_loc_net[loc] -= r.amount_rub
     rep.by_location = dict(sorted(by_loc_net.items(), key=lambda kv: -abs(kv[1])))
 
-    # Топ-3 товаров по выручке (только продажи: связываем по tx_id)
-    sales_tx = {r.tx_id for r in money_today if r.op_type == "продажа"}
+    # Топ-3 товаров по выручке. Если цена за единицу в строке товаров пуста
+    # (типично — LLM указал только total), распределяем total из «Движение денег»
+    # пропорционально qty между lines одной продажи (тот же tx_id).
+    sale_amount_by_tx: dict[str, float] = {
+        r.tx_id: float(r.amount_rub) for r in money_today if r.op_type == "продажа"
+    }
+    sale_total_qty_by_tx: dict[str, float] = defaultdict(float)
+    for g in goods_today:
+        if g.op_type == "продажа" and g.tx_id in sale_amount_by_tx:
+            sale_total_qty_by_tx[g.tx_id] += g.qty
+
     revenue_by_product: dict[str, tuple[int, float]] = defaultdict(lambda: (0, 0.0))
     for g in goods_today:
-        if g.op_type == "продажа" and g.tx_id in sales_tx:
-            current_rub, current_qty = revenue_by_product[g.product]
-            line_value = int(round((g.price_per_unit_rub or 0) * g.qty))
-            revenue_by_product[g.product] = (current_rub + line_value, current_qty + g.qty)
-    # Если нет цен — топ по количеству
+        if g.op_type != "продажа" or g.tx_id not in sale_amount_by_tx:
+            continue
+        if g.price_per_unit_rub:
+            line_value = float(g.price_per_unit_rub) * g.qty
+        else:
+            total_qty = sale_total_qty_by_tx.get(g.tx_id, 0)
+            line_value = (
+                sale_amount_by_tx[g.tx_id] * (g.qty / total_qty)
+                if total_qty > 0 else 0.0
+            )
+        current_rub, current_qty = revenue_by_product[g.product]
+        revenue_by_product[g.product] = (
+            current_rub + int(round(line_value)),
+            current_qty + g.qty,
+        )
+
     top = sorted(
         revenue_by_product.items(),
         key=lambda kv: (-kv[1][0], -kv[1][1]),
