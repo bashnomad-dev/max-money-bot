@@ -32,6 +32,26 @@ COMMANDS = (
     "stock", "repair", "locations", "products",
 )
 
+# Русские алиасы к английским командам. MAX матчит команды простым сравнением
+# строки (см. maxapi Command), кириллица работает. Английские оставляем — короче
+# и надёжнее с раскладкой.
+COMMAND_ALIASES: dict[str, tuple[str, ...]] = {
+    "start": ("старт",),
+    "help": ("помощь", "справка"),
+    "version": ("версия",),
+    "link": ("привязать",),
+    "setup": ("настройка",),
+    "today": ("сегодня",),
+    "last": ("последние",),
+    "undo": ("отмени", "отменить"),
+    "edit": ("правка",),
+    "cancel": ("сброс",),
+    "stock": ("остаток", "остатки"),
+    "repair": ("пересчёт", "пересчет"),
+    "locations": ("точки",),
+    "products": ("товары",),
+}
+
 
 class _MidDedup:
     """Простой in-memory дедуп message_id с TTL."""
@@ -78,15 +98,19 @@ def register_all(client: MAXClient, ctx: AppContext) -> None:
     handlers = make_handlers(client, ctx)
     dp = client.dispatcher
 
-    # Команды: фильтр Command(commands=[...])
+    # Команды: фильтр Command(commands=[...]). Каждая английская команда + её
+    # русские алиасы вешаются на один и тот же handler.
+    total = 0
     for cmd in COMMANDS:
         h = handlers[cmd]
-        dp.message_created.register(_wrap(h, kind="cmd", name=cmd), Command(commands=[cmd]))
+        for name in (cmd, *COMMAND_ALIASES.get(cmd, ())):
+            dp.message_created.register(_wrap(h, kind="cmd", name=name), Command(commands=[name]))
+            total += 1
 
     # Любой message_created без команды → голос или текст
     dp.message_created.register(_wrap_voice_or_text(handlers, client))
 
-    log.info("Зарегистрировано: %d команд + voice/text fallback", len(COMMANDS))
+    log.info("Зарегистрировано: %d команд (с алиасами) + voice/text fallback", total)
 
 
 def _wrap(handler, *, kind: str, name: str):
