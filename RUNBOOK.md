@@ -54,11 +54,23 @@ cp docs/intake/evgeny/price-normalized.json data/products-import.json
 python -m src.main
 ```
 
-## Деплой на VPS (Selectel/Aeza/Timeweb)
+## Деплой на VPS (Timeweb/Selectel/Aeza, Ubuntu 24.04 = Python 3.12)
+
+### Быстрый путь — скрипт
+От root на чистом сервере:
+```bash
+git clone https://github.com/bashnomad-dev/max-money-bot.git /tmp/mmb && bash /tmp/mmb/deploy/setup-vps.sh
+```
+Ставит пакеты (python3.12, ffmpeg, git), создаёт пользователя `maxbot`, клонирует
+репо в `/home/maxbot/max-money-bot`, поднимает venv, импортирует прайс, ставит
+systemd-unit и печатает оставшиеся ручные шаги (секреты).
+Обновление кода потом: `bash /home/maxbot/max-money-bot/deploy/update.sh`.
+
+Ниже — те же шаги вручную, если нужен контроль.
 
 ### 1. Подготовка VPS (Ubuntu 24.04)
 ```bash
-apt update && apt install -y python3.11 python3.11-venv ffmpeg git
+apt update && apt install -y python3 python3-venv python3-pip ffmpeg git
 useradd -m -s /bin/bash maxbot
 su - maxbot
 ```
@@ -67,7 +79,7 @@ su - maxbot
 ```bash
 git clone https://github.com/bashnomad-dev/max-money-bot.git
 cd max-money-bot
-python3.11 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```

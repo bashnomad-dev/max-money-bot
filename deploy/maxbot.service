@@ -1,0 +1,19 @@
+[Unit]
+Description=max-money-bot (MAX-бот учёта стройматериалов)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=maxbot
+WorkingDirectory=/home/maxbot/max-money-bot
+ExecStart=/home/maxbot/max-money-bot/.venv/bin/python -m src.main
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+# GigaAM кеширует модель (~1 ГБ) в домашнем каталоге пользователя
+Environment=HOME=/home/maxbot
+
+[Install]
+WantedBy=multi-user.target
