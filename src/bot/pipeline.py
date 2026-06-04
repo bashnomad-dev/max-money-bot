@@ -14,6 +14,7 @@ from src.bot.text_responses import (
     CARD_DEDUP_MSG,
     CARD_LARGE_AMOUNT_MSG,
     CARD_LOW_CONFIDENCE_MSG,
+    CARD_NEGATIVE_STOCK_MSG,
     DUPLICATE_MSG,
     LLM_DOWN_MSG,
     NEED_LINK_MSG,
@@ -227,6 +228,25 @@ async def process_parsed(
         )
 
     if decision.step == DialogStep.WRITE:
+        # Защита от ухода остатка в минус (SPEC §17 п.22) — только для выбывающих операций.
+        if isinstance(parsed, (Sale, Return, WriteoffOrMovement)):
+            try:
+                spreadsheet = _open_spreadsheet_for_chat(ctx, chat_id)
+                warning = _negative_stock_warning(spreadsheet, parsed) if spreadsheet else None
+            except Exception:  # noqa: BLE001
+                log.exception("Проверка минусового остатка не удалась — пропускаю")
+                warning = None
+            if warning:
+                ctx.dialog.set(
+                    chat_id,
+                    intent=f"confirm_{type(parsed).__name__.lower()}",
+                    partial_data={
+                        "parsed_class": type(parsed).__name__,
+                        "parsed_json": parsed.model_dump(mode='json'),
+                    },
+                    ttl_minutes=settings.dialog_state_ttl_minutes,
+                )
+                return warning
         return await _do_write(ctx, parsed, chat_id, user_id, message_id, semhash)
 
     if decision.step == DialogStep.CLARIFY:
@@ -376,6 +396,43 @@ def _affected_stock_keys(op: Any) -> set[tuple[str, str]]:
     return keys
 
 
+def _outflow_lines(op: Any) -> list[tuple[str, str, float]]:
+    """(товар, точка, qty) для строк, уменьшающих остаток. Приход не включается."""
+    out: list[tuple[str, str, float]] = []
+    if isinstance(op, Sale):
+        for line in op.lines:
+            out.append((line.name, op.location.value, line.qty))
+    elif isinstance(op, Return):
+        if op.direction.value == "to_supplier":
+            for line in op.lines:
+                out.append((line.name, op.location.value, line.qty))
+    elif isinstance(op, WriteoffOrMovement):
+        if op.op_type.value == "перемещение":
+            if op.source:
+                for line in op.lines:
+                    out.append((line.name, op.source.value, line.qty))
+        elif op.location:
+            for line in op.lines:
+                out.append((line.name, op.location.value, line.qty))
+    return out
+
+
+def _negative_stock_warning(spreadsheet, op: Any) -> str | None:
+    """Если операция уводит остаток в минус — текст карточки-предупреждения, иначе None."""
+    outflows = _outflow_lines(op)
+    if not outflows:
+        return None
+    calc = recompute_from_movements(_read_goods_rows(spreadsheet))
+    bad: list[str] = []
+    for name, loc, qty in outflows:
+        cur = calc.get_qty(name, loc)
+        if cur - qty < 0:
+            bad.append(f"  • {name} на {loc}: есть {cur:g}, нужно {qty:g} → {cur - qty:g}")
+    if not bad:
+        return None
+    return CARD_NEGATIVE_STOCK_MSG.format(lines="\n".join(bad))
+
+
 def _dispatch_write(spreadsheet, op: Any):
     if isinstance(op, Sale):
         return write_sale(spreadsheet, op)
@@ -388,8 +445,12 @@ def _dispatch_write(spreadsheet, op: Any):
     if isinstance(op, WriteoffOrMovement):
         return write_writeoff_or_movement(spreadsheet, op)
     if isinstance(op, Inventory):
-        # expected_stock пустой при первой реализации — позже подтянем из listа Остатки
-        return write_inventory(spreadsheet, op, expected_stock={})
+        # Расчётный остаток на момент инвентаризации — из истории движений.
+        calc = recompute_from_movements(_read_goods_rows(spreadsheet))
+        expected_stock = {
+            fact.name: calc.get_qty(fact.name, op.location.value) for fact in op.facts
+        }
+        return write_inventory(spreadsheet, op, expected_stock=expected_stock)
     raise TypeError(f"Не поддерживаемый тип для записи: {type(op).__name__}")
 
 

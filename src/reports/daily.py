@@ -29,6 +29,7 @@ class DailyReport:
     by_location: dict[str, int] = field(default_factory=dict)
     top_products: list[tuple[str, int, float]] = field(default_factory=list)
     is_intermediate: bool = False  # для /today
+    stock_drift: list[tuple[str, str, float, float]] = field(default_factory=list)
 
     @property
     def balance_rub(self) -> int:
@@ -97,7 +98,29 @@ def build_daily_report(
         key=lambda kv: (-kv[1][0], -kv[1][1]),
     )[:3]
     rep.top_products = [(name, rub, qty) for name, (rub, qty) in top]
+
+    # В автоотчёте (не в /today) проверяем, не правили ли «Остатки» руками.
+    if not is_intermediate:
+        try:
+            from src.stock.sheets_sync import detect_stock_drift
+            rep.stock_drift = detect_stock_drift(spreadsheet)
+        except Exception:  # noqa: BLE001
+            rep.stock_drift = []
+
     return rep
+
+
+def _drift_warning(rep: DailyReport) -> str:
+    """Блок предупреждения о ручных правках листа «Остатки» (пусто, если расхождений нет)."""
+    if not rep.stock_drift:
+        return ""
+    lines = ["", "⚠️ Лист «Остатки» расходится с расчётом (правки вручную?):"]
+    for product, loc, sheet_qty, calc_qty in rep.stock_drift[:10]:
+        lines.append(f"  • {product} на {loc}: в листе {sheet_qty:g}, должно {calc_qty:g}")
+    if len(rep.stock_drift) > 10:
+        lines.append(f"  …и ещё {len(rep.stock_drift) - 10}")
+    lines.append("Запусти /repair stock, чтобы пересчитать.")
+    return "\n".join(lines)
 
 
 def format_daily_report(rep: DailyReport) -> str:
@@ -117,6 +140,7 @@ def format_daily_report(rep: DailyReport) -> str:
             f"– Расход: 0 рублей\n"
             f"– Итог: 0 рублей.\n"
             f"Сегодня финансовых операций не найдено."
+            + _drift_warning(rep)
         )
 
     title = (
@@ -147,5 +171,9 @@ def format_daily_report(rep: DailyReport) -> str:
                 parts.append(f"  {i}. {name} — {fmt_rub(rub)} ₽ ({qty_str} шт)")
             else:
                 parts.append(f"  {i}. {name} — {qty_str} шт (цена не указана)")
+
+    drift = _drift_warning(rep)
+    if drift:
+        parts.append(drift)
 
     return "\n".join(parts)

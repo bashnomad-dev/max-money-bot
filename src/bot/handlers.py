@@ -22,6 +22,9 @@ from src.bot.text_responses import (
     LINKED_MSG,
     LLM_DOWN_MSG,
     NEED_LINK_MSG,
+    REPAIR_DONE_MSG,
+    REPAIR_FAILED_MSG,
+    REPAIR_START_MSG,
     SETUP_DONE_MSG,
     START_MSG,
     STT_DOWN_MSG,
@@ -43,7 +46,8 @@ from src.config.settings import settings
 from src.reports.daily import build_daily_report, format_daily_report
 from src.reports.stock import format_stock_report
 from src.sheets.setup import setup_sheet
-from src.sheets.writer import undo_by_refs
+from src.sheets.writer import edit_last_field, undo_by_refs
+from src.stock.sheets_sync import repair_full
 
 log = logging.getLogger(__name__)
 
@@ -231,6 +235,40 @@ def make_handlers(client, ctx: AppContext) -> dict[str, Any]:
             UNDO_CONFIRM_MSG.format(summary=last["summary"], pin_hint=""),
         )
 
+    async def handle_edit(message: Any) -> None:
+        if not await _check_access(message):
+            return
+        chat_id = _chat_id(message)
+        parts = _text(message).split(maxsplit=3)
+        # /edit last <поле> <значение>
+        if len(parts) < 4 or parts[1].lower() != "last":
+            await client.reply(
+                message,
+                "Использование: /edit last <поле> <значение>\n"
+                "Поля: сумма, контрагент, описание.\n"
+                "Например: /edit last сумма 18000",
+            )
+            return
+        field, value = parts[2], parts[3]
+        last = ctx.operations_log.last(chat_id)
+        if not last:
+            await client.reply(message, "Нечего править — операций ещё не было.")
+            return
+        spreadsheet = _open_spreadsheet(ctx, chat_id)
+        if spreadsheet is None:
+            await client.reply(message, NEED_LINK_MSG)
+            return
+        try:
+            changed = edit_last_field(spreadsheet, last["sheet_refs"], field, value)
+        except ValueError as e:
+            await client.reply(message, str(e))
+            return
+        except Exception:  # noqa: BLE001
+            log.exception("edit_last_field failed")
+            await client.reply(message, "Не получилось изменить. Попробуй ещё раз позже.")
+            return
+        await client.reply(message, f"Поправил последнюю операцию — {changed}")
+
     async def handle_cancel(message: Any) -> None:
         if not await _check_access(message):
             return
@@ -257,6 +295,23 @@ def make_handlers(client, ctx: AppContext) -> dict[str, Any]:
             message,
             format_stock_report(spreadsheet, product_query, location),
         )
+
+    async def handle_repair(message: Any) -> None:
+        if not await _check_access(message):
+            return
+        chat_id = _chat_id(message)
+        spreadsheet = _open_spreadsheet(ctx, chat_id)
+        if spreadsheet is None:
+            await client.reply(message, NEED_LINK_MSG)
+            return
+        await client.reply(message, REPAIR_START_MSG)
+        try:
+            rows, written = repair_full(spreadsheet)
+        except Exception as e:  # noqa: BLE001
+            log.exception("repair_full failed")
+            await client.reply(message, REPAIR_FAILED_MSG.format(error=e))
+            return
+        await client.reply(message, REPAIR_DONE_MSG.format(rows=rows, written=written))
 
     async def handle_locations(message: Any) -> None:
         if not await _check_access(message):
@@ -549,8 +604,10 @@ def make_handlers(client, ctx: AppContext) -> dict[str, Any]:
         "today": handle_today,
         "last": handle_last,
         "undo": handle_undo,
+        "edit": handle_edit,
         "cancel": handle_cancel,
         "stock": handle_stock,
+        "repair": handle_repair,
         "locations": handle_locations,
         "products": handle_products,
         "voice": handle_voice,

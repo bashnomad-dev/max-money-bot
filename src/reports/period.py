@@ -17,6 +17,7 @@ from src.reports._common import (
     read_goods_rows_for_reports,
     read_money_rows,
 )
+from src.stock.calculator import GoodsRow, StockCalculator
 
 
 @dataclass
@@ -51,7 +52,11 @@ def build_period_report(
     start, end, period_label = period_bounds(period_type, year, month, quarter, relative, today)
 
     money_rows = filter_money_by_period(read_money_rows(spreadsheet), start, end)
-    goods_rows = filter_goods_by_period(read_goods_rows_for_reports(spreadsheet), start, end)
+    all_goods = read_goods_rows_for_reports(spreadsheet)
+    # Себестоимость продаж считаем по всей истории (СВ-цена накапливается с самого
+    # начала), потом фильтруем по периоду.
+    _populate_sale_costs(all_goods)
+    goods_rows = filter_goods_by_period(all_goods, start, end)
 
     if location_filter:
         money_rows = [r for r in money_rows if r.location == location_filter]
@@ -79,6 +84,31 @@ def build_period_report(
     # Топ-3: по выручке / прибыли / количеству
     rep.top_items = _build_top(goods_rows, money_rows, top_metric)
     return rep
+
+
+def _populate_sale_costs(rows: list[GoodsAggRow]) -> None:
+    """Проставить cost_rub каждой продажной строке = qty * СВ-цена на момент продажи.
+
+    Реплеим всю историю движений хронологически тем же калькулятором, что и остатки,
+    чтобы СВ-цена совпадала с листом «Остатки».
+    """
+    calc = StockCalculator()
+    for r in sorted(rows, key=lambda x: x.occurred_at):
+        if r.op_type == "продажа":
+            r.cost_rub = calc.snapshot(r.product, r.location).avg_cost_rub * r.qty
+        calc.apply(
+            GoodsRow(
+                occurred_at=r.occurred_at,
+                op_type=r.op_type,
+                location=r.location,
+                source=r.source,
+                product=r.product,
+                qty=r.qty,
+                unit=r.unit,
+                price_per_unit_rub=r.price_per_unit_rub,
+                comment=r.comment,
+            )
+        )
 
 
 def _build_top(
@@ -118,9 +148,8 @@ def _build_top(
                 line_revenue = 0.0
         aggregate[g.product]["revenue"] += line_revenue
         aggregate[g.product]["qty"] += g.qty
-        # Себестоимость для прибыли — TODO: брать СВ-цену из остатков на момент продажи.
-        # Пока 0 → прибыль = выручка (визуально лучше, чем 0; пользователь видит порядок).
-        aggregate[g.product]["cost"] += 0.0
+        # Себестоимость = qty * СВ-цена на момент продажи (см. _populate_sale_costs).
+        aggregate[g.product]["cost"] += g.cost_rub or 0.0
 
     if metric == "выручка":
         sort_key = lambda kv: -kv[1]["revenue"]
