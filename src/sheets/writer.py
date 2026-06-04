@@ -112,6 +112,17 @@ def _safe(v: Any) -> str:
     return "не указано" if v is None or v == "" else str(v)
 
 
+def _esc(v: Any) -> Any:
+    """Экранировать текст, который Sheets при USER_ENTERED примет за формулу.
+
+    Имена/комментарии, начинающиеся с = + - @, иначе превращаются в #ERROR!.
+    Ведущий апостроф форсит текстовый формат и в самой ячейке не отображается.
+    """
+    if isinstance(v, str) and v[:1] in ("=", "+", "-", "@"):
+        return "'" + v
+    return v
+
+
 # ============================================================
 # Низкоуровневая запись в Sheets с компенсацией
 # ============================================================
@@ -152,9 +163,9 @@ def _money_row(
         _time(occurred_at),
         op_type,
         amount_rub,
-        description or "",
+        _esc(description or ""),
         _safe(category) if category else "",
-        _safe(counterparty),
+        _esc(_safe(counterparty)),
         _safe(location.value if location else None),
         payment,
         tx_id,
@@ -178,12 +189,12 @@ def _goods_row(
         op_type,
         _safe(location.value if location else None),
         source.value if source else "",
-        line.name,
+        _esc(line.name),
         line.qty,
         _ru_unit(line.unit),
         line.price_per_unit_rub if line.price_per_unit_rub is not None else "",
-        _safe(counterparty),
-        line.comment or comment or "",
+        _esc(_safe(counterparty)),
+        _esc(line.comment or comment or ""),
         tx_id,
     ]
 

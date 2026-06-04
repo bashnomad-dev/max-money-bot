@@ -27,7 +27,7 @@ from src.sheets.schema import (
     SHEET_STOCK,
     STOCK_HEADERS,
 )
-from src.sheets.writer import _parse_amount_rub, edit_last_field
+from src.sheets.writer import _esc, _parse_amount_rub, edit_last_field
 from src.stock.sheets_sync import detect_stock_drift
 
 
@@ -71,6 +71,21 @@ def test_edit_last_field_unknown_field_raises(fake_spreadsheet):
     refs = [{"sheet": SHEET_MONEY, "row_index": 2}]
     with pytest.raises(ValueError):
         edit_last_field(fake_spreadsheet, refs, "цвет", "синий")
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("+ СуперКамин штукатурка", "'+ СуперКамин штукатурка"),
+        ("=сумма", "'=сумма"),
+        ("-скидка", "'-скидка"),
+        ("@тег", "'@тег"),
+        ("Цемент М500", "Цемент М500"),
+        ("", ""),
+    ],
+)
+def test_esc_protects_formula_like_text(value, expected):
+    assert _esc(value) == expected
 
 
 def test_edit_last_field_no_money_row_raises(fake_spreadsheet):
