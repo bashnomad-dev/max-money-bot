@@ -239,17 +239,19 @@ def make_handlers(client, ctx: AppContext) -> dict[str, Any]:
         if not await _check_access(message):
             return
         chat_id = _chat_id(message)
-        parts = _text(message).split(maxsplit=3)
-        # /edit last <поле> <значение>
-        if len(parts) < 4 or parts[1].lower() != "last":
+        rest = _text(message).split()[1:]  # без самой команды
+        # Необязательное «last»/«последнюю» — правим всегда последнюю операцию.
+        if rest and rest[0].lower() in ("last", "последнюю", "последняя", "последнее"):
+            rest = rest[1:]
+        if len(rest) < 2:
             await client.reply(
                 message,
-                "Использование: /edit last <поле> <значение>\n"
+                "Использование: /правка [последнюю] <поле> <значение>\n"
                 "Поля: сумма, контрагент, описание.\n"
-                "Например: /edit last сумма 18000",
+                "Например: /правка сумма 18000",
             )
             return
-        field, value = parts[2], parts[3]
+        field, value = rest[0], " ".join(rest[1:])
         last = ctx.operations_log.last(chat_id)
         if not last:
             await client.reply(message, "Нечего править — операций ещё не было.")
