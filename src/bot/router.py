@@ -28,8 +28,8 @@ log = logging.getLogger(__name__)
 
 COMMANDS = (
     "start", "help", "version", "link", "setup",
-    "today", "last", "undo", "cancel",
-    "stock", "locations", "products",
+    "today", "last", "undo", "edit", "cancel",
+    "stock", "repair", "locations", "products",
 )
 
 

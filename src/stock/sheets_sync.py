@@ -108,6 +108,47 @@ def _first_unit_for(rows: list[GoodsRow], snap: StockSnapshot) -> str:
     return ""
 
 
+def detect_stock_drift(
+    spreadsheet, eps: float = 0.001
+) -> list[tuple[str, str, float, float]]:
+    """Сверить лист «Остатки» с пересчётом из истории движений.
+
+    Возвращает список расхождений (товар, точка, остаток_в_листе, расчётный_остаток).
+    Непустой результат = лист правили вручную (или прошёл сбой sync) → нужен /repair stock.
+    """
+    calc = recompute_from_movements(_read_goods_rows(spreadsheet))
+    expected: dict[tuple[str, str], float] = {
+        (s.product, s.location): s.qty for s in calc.all_snapshots() if s.qty != 0
+    }
+
+    ws = spreadsheet.worksheet(SHEET_STOCK)
+    a1_cell = ws.cell(1, 1).value
+    header_offset = 2 if (a1_cell and "СИСТЕМНЫЙ" in a1_cell) else 1
+    try:
+        existing = ws.get_all_records(head=header_offset, expected_headers=STOCK_HEADERS)
+    except TypeError:
+        existing = ws.get_all_records(head=header_offset)
+
+    drift: list[tuple[str, str, float, float]] = []
+    seen: set[tuple[str, str]] = set()
+    for rec in existing:
+        key = (str(rec.get("Товар", "")).strip(), str(rec.get("Точка", "")).strip())
+        if not key[0]:
+            continue
+        seen.add(key)
+        sheet_qty = _safe_float(rec.get("Количество", 0))
+        calc_qty = expected.get(key, 0.0)
+        if abs(sheet_qty - calc_qty) > eps:
+            drift.append((key[0], key[1], sheet_qty, calc_qty))
+
+    # Позиции, которые должны быть, но в листе их нет
+    for key, calc_qty in expected.items():
+        if key not in seen:
+            drift.append((key[0], key[1], 0.0, calc_qty))
+
+    return drift
+
+
 def sync_after_op(
     spreadsheet,
     calculator: StockCalculator,

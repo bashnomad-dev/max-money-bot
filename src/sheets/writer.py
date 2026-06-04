@@ -496,6 +496,60 @@ def _compensate(spreadsheet, refs: list[SheetRowRef]) -> None:
 # Удаление операции по tx_id (для /undo)
 # ============================================================
 
+# ============================================================
+# Точечная правка последней операции (/edit last)
+# ============================================================
+
+# Поле → (заголовок в листе, 1-based номер колонки в «Движении денег»)
+EDIT_FIELDS: dict[str, tuple[str, int]] = {
+    "сумма": ("Сумма (₽)", 4),
+    "контрагент": ("Контрагент", 7),
+    "описание": ("Описание", 5),
+}
+
+
+def _parse_amount_rub(value: str) -> int | None:
+    raw = value.strip().lower().replace(" ", "").replace("₽", "").replace("р", "")
+    mult = 1
+    if raw.endswith(("к", "k", "т")):
+        mult = 1000
+        raw = raw[:-1]
+    raw = raw.replace(",", ".")
+    try:
+        return int(round(float(raw) * mult))
+    except ValueError:
+        return None
+
+
+def edit_last_field(spreadsheet, sheet_refs: list[dict[str, Any]], field: str, value: str) -> str:
+    """Изменить одно поле последней операции в «Движении денег».
+
+    Возвращает краткое описание изменения. Бросает ValueError при неверном поле/значении.
+    """
+    fld = field.strip().lower()
+    spec = EDIT_FIELDS.get(fld)
+    if spec is None:
+        raise ValueError(
+            f"Неизвестное поле «{field}». Можно править: сумма, контрагент, описание."
+        )
+    header, col = spec
+    money_ref = next((r for r in sheet_refs if r["sheet"] == SHEET_MONEY), None)
+    if money_ref is None:
+        raise ValueError("У последней операции нет денежной строки — это поле не редактируется.")
+
+    if fld == "сумма":
+        amount = _parse_amount_rub(value)
+        if amount is None:
+            raise ValueError("Сумма должна быть числом, например: /edit last сумма 18000")
+        cell_value: Any = amount
+    else:
+        cell_value = value.strip()
+
+    ws = spreadsheet.worksheet(SHEET_MONEY)
+    ws.update_cell(money_ref["row_index"], col, cell_value)
+    return f"{header}: {cell_value}"
+
+
 def undo_by_refs(spreadsheet, refs: list[dict[str, Any]]) -> int:
     """Удалить все строки операции из Sheets. Возвращает количество удалённых.
 

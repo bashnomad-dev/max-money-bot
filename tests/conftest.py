@@ -59,6 +59,13 @@ class FakeWorksheet:
             for c_offset, v in enumerate(row_vals):
                 self.rows[target_row][col_idx + c_offset] = v
 
+    def update_cell(self, row: int, col: int, value) -> None:
+        while len(self.rows) < row:
+            self.rows.append([])
+        while len(self.rows[row - 1]) < col:
+            self.rows[row - 1].append("")
+        self.rows[row - 1][col - 1] = value
+
     def append_rows(self, rows, value_input_option=None):
         for row in rows:
             self.rows.append(list(row))
@@ -73,7 +80,7 @@ class FakeWorksheet:
     def get_all_values(self) -> list[list[str]]:
         return [[str(c) if c is not None else "" for c in r] for r in self.rows]
 
-    def get_all_records(self) -> list[dict]:
+    def get_all_records(self, head=None, expected_headers=None) -> list[dict]:
         if not self.rows or len(self.rows) < 2:
             return []
         # Headers — первая или вторая строка (если первая — маркер)

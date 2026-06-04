@@ -60,6 +60,9 @@ class GoodsAggRow:
     unit: str
     price_per_unit_rub: float | None
     tx_id: str
+    source: str | None = None
+    comment: str | None = None
+    cost_rub: float | None = None  # себестоимость строки = qty * СВ-цена на момент операции
 
 
 def read_money_rows(spreadsheet) -> list[MoneyRow]:
@@ -104,6 +107,8 @@ def read_goods_rows_for_reports(spreadsheet) -> list[GoodsAggRow]:
                 unit=str(r.get("Единица", "")).strip(),
                 price_per_unit_rub=_to_float_or_none(r.get("Цена за ед. (₽)", "")),
                 tx_id=str(r.get("tx_id", "")).strip(),
+                source=(str(r.get("Источник", "")).strip() or None),
+                comment=(str(r.get("Комментарий", "")).strip() or None),
             )
         )
     return out
