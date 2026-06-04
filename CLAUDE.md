@@ -12,14 +12,14 @@
 - `docs/scenarios.md` — все G/C/E/F/T/V кейсы.
 - `docs/archive/` — старые версии (v1.0 «прораб», исходный шаблонный бриф). Не использовать.
 
-## Стек
-- Runtime: Python 3.11+
-- Bot framework: MAX Bot API (long-polling в MVP; готовой Python-обёртки может не быть — план B тонкий httpx-клиент)
-- STT: OpenAI Whisper API (`whisper-1`, `language="ru"`)
-- LLM: Anthropic Claude (`claude-haiku-4-5-20251001` основной, `claude-sonnet-4-6` fallback при `critical_confidence < 0.7`)
+## Стек (v2.1)
+- Runtime: Python 3.12
+- Bot framework: MAX Bot API через `maxapi` (long-polling)
+- LLM-парсер: **OpenRouter** (`LLM_BACKEND=openrouter`, модель `anthropic/claude-haiku-4.5`). `LLM_BACKEND_FALLBACK` сейчас пустой; GigaChat подключается как опциональный фолбэк (ключ в `.env`). OpenRouter — предоплата в USD, с RU-IP проверять доступность.
+- STT: **GigaAM** (локальная модель `v2_rnnt`, требует ffmpeg в PATH)
 - Google Sheets: `gspread` + service account
 - SQLite — технический слой (idempotency, dedup, dialog_state, operations_log для `/undo`, pending_writes, products_cache, locations_cache)
-- Deploy: VPS + systemd
+- Deploy: VPS + systemd (см. `deploy/`, RUNBOOK.md)
 
 ## Команды
 ```bash
@@ -42,7 +42,7 @@ mypy src
 Полный список — `.env.example`. Никогда не коммитить `.env`, `secrets/`.
 
 Ключевые группы:
-- **API:** `MAX_BOT_TOKEN`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_SERVICE_ACCOUNT_JSON`
+- **API:** `MAX_BOT_TOKEN`, `OPENROUTER_API_KEY` (+ `OPENROUTER_MODEL`), `GIGACHAT_CREDENTIALS` (опц. фолбэк), `GOOGLE_SERVICE_ACCOUNT_JSON`
 - **Sheets:** `DEFAULT_SHEET_ID`, `ENABLE_PROCESSING_LOG_SHEET`, `SHEETS_SCHEMA_VERSION`
 - **Доступ:** `ALLOWED_USER_IDS`, `SILENT_REJECT`, `OPS_PIN`, `PIN_MAX_ATTEMPTS`, `PIN_LOCKOUT_MINUTES`
 - **Поведение:** `TZ` (Europe/Moscow), `DEFAULT_LOCATION`, `DAILY_REPORT_TIME` (21:00)
