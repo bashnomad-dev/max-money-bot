@@ -200,3 +200,35 @@ def test_detect_stock_drift_flags_manual_edit(fake_spreadsheet):
 def test_detect_stock_drift_clean_when_matches(fake_spreadsheet):
     ss = _spreadsheet_with_goods_and_stock(fake_spreadsheet, stock_qty=70)
     assert detect_stock_drift(ss) == []
+
+
+# ============================================================
+# Экранирование при записи в «Остатки»
+# ============================================================
+
+def test_stock_row_escapes_formula_like_product():
+    from src.stock.calculator import StockSnapshot
+    from src.stock.sheets_sync import _stock_row
+
+    snap = StockSnapshot(product="+ ТестТовар", location="Магазин Зинино", qty=3)
+    row = _stock_row(snap)
+    assert row[0] == "'+ ТестТовар"  # иначе Sheets сделает #NAME?
+
+
+# ============================================================
+# Идемпотентность setup (маркерный лист «Остатки»)
+# ============================================================
+
+def test_ensure_worksheet_marker_sheet_is_idempotent(fake_spreadsheet):
+    from src.sheets.schema import SPECS
+    from src.sheets.setup import ensure_worksheet
+
+    spec = SPECS[SHEET_STOCK]
+    ws = fake_spreadsheet.add_worksheet(SHEET_STOCK)
+    ws.append_row([spec.a1_marker])   # строка 1 — маркер
+    ws.append_row(spec.headers)        # строка 2 — заголовки
+
+    # Повторный setup не должен падать на несовпадении заголовков.
+    result_ws, created = ensure_worksheet(fake_spreadsheet, spec)
+    assert created is False
+    assert result_ws is ws

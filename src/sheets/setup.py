@@ -82,7 +82,12 @@ def ensure_worksheet(spreadsheet, spec: SheetSpec) -> tuple[object, bool]:
 
     try:
         ws = spreadsheet.worksheet(spec.name)
-        existing_headers = ws.row_values(1)
+        # Лист с системным маркером (например «Остатки») держит заголовки в строке 2.
+        if spec.a1_marker and ws.row_values(1)[:1] == [spec.a1_marker]:
+            header_row = 2
+        else:
+            header_row = 1
+        existing_headers = ws.row_values(header_row)
         if existing_headers and existing_headers[: len(spec.headers)] != spec.headers:
             raise SheetsSetupError(
                 f"Лист «{spec.name}» имеет несовпадающие заголовки.\n"
@@ -90,7 +95,7 @@ def ensure_worksheet(spreadsheet, spec: SheetSpec) -> tuple[object, bool]:
                 f"  Найдено: {existing_headers[: len(spec.headers)]}"
             )
         if not existing_headers:
-            ws.update("A1", [spec.headers])
+            ws.update(f"A{header_row}", [spec.headers])
         return ws, False
     except gspread.WorksheetNotFound:
         ws = spreadsheet.add_worksheet(

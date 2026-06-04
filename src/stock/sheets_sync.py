@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Any
 
 from src.sheets.schema import GOODS_HEADERS, SHEET_GOODS, SHEET_STOCK, STOCK_HEADERS
+from src.sheets.writer import _esc
 from src.stock.calculator import GoodsRow, StockCalculator, StockSnapshot, recompute_from_movements
 
 log = logging.getLogger(__name__)
@@ -21,8 +22,8 @@ log = logging.getLogger(__name__)
 def _stock_row(snap: StockSnapshot, default_unit: str = "") -> list[Any]:
     """Сборка строки для листа «Остатки» в порядке STOCK_HEADERS."""
     return [
-        snap.product,
-        snap.location,
+        _esc(snap.product),
+        _esc(snap.location),
         snap.qty,
         default_unit or "",
         round(snap.avg_cost_rub, 2),
