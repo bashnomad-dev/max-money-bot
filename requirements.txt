@@ -5,8 +5,11 @@ maxapi>=0.4
 gigachat>=0.1.30          # официальный Python SDK GigaChat от Сбера
 
 # === STT ===
-gigaam>=2.0               # локальная модель распознавания речи (Сбер), бесплатная
-# при невозможности установить gigaam — fallback на OpenAI Whisper API
+# GigaAM ставится НЕ из PyPI (там только устаревший 0.1.0), а из git — см. deploy/setup-vps.sh:
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+#   pip install git+https://github.com/salute-developers/GigaAM.git
+# gigaam импортит torchaudio, поэтому нужны ОБА (torch+torchaudio), CPU-сборка.
+# Без них бот работает в text-only режиме (импорт gigaam ленивый); fallback на Whisper API ниже.
 openai>=1.40              # для fallback Whisper и опц. эмбеддингов
 
 # === Google Sheets ===

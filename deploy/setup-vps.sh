@@ -23,6 +23,9 @@ fi
 
 echo "[4/6] venv + зависимости…"
 sudo -u "$BOT_USER" bash -lc "cd '$APP_DIR' && python3 -m venv .venv && .venv/bin/pip install -q --upgrade pip && .venv/bin/pip install -q -r requirements.txt"
+# STT (GigaAM): не из PyPI. torch+torchaudio — CPU-сборка (иначе тянет CUDA ~2 ГБ), затем gigaam из git.
+echo "[4b/6] STT: torch+torchaudio (CPU) + GigaAM из git…"
+sudo -u "$BOT_USER" bash -lc "cd '$APP_DIR' && .venv/bin/pip install -q torch torchaudio --index-url https://download.pytorch.org/whl/cpu && .venv/bin/pip install -q git+https://github.com/salute-developers/GigaAM.git"
 
 echo "[5/6] Каталоги и импорт прайса…"
 sudo -u "$BOT_USER" mkdir -p "$APP_DIR/secrets" "$APP_DIR/data" "$APP_DIR/backups"
