@@ -9,20 +9,25 @@
 | VPS | 1 vCPU / 1 GB RAM | хостинг бота 24/7 |
 | MAX Bot API | — | регистрация бота (юрлицо РФ обязательно) |
 | Google Sheets API | service account | запись в таблицу |
-| GigaChat | demo/B2B-тариф | парсинг команд |
+| OpenRouter | предоплата USD | парсинг команд (LLM) |
+| GigaChat | опц. | резервный LLM-фолбэк (необязателен) |
 
 ## Получение ключей
 
 ### 1. MAX Bot
-- Заходим на https://dev.max.ru (актуальный URL уточнить).
-- Регистрируем бота через юрлицо (ИП/ООО). У Евгения 3 ООО — подходит.
-- Получаем `MAX_BOT_TOKEN`.
-- Если регистрация продакшен-бота отложена — можно использовать «личный режим» без публикации (вариант на этапе разработки).
+- Заходим на **https://business.max.ru/self**, регистрируем и **верифицируем организацию** (одно из ООО Евгения, верификация через Госуслуги). Маршрут через `@MasterBot` устарел и больше не работает.
+- «Чат-боты» → «Создать» → заполняем карточку. @-адрес бота присваивается автоматически (вида `idИНН_bot`), выбрать своё имя нельзя.
+- Отправляем на **модерацию MAX — до 2 рабочих дней**. Токен появляется только после одобрения, поэтому заводить бота надо заранее, не в день запуска.
+- После одобрения: «Чат-боты» → «Интеграция» → «Получить токен» → это `MAX_BOT_TOKEN`. Одна организация — максимум 5 ботов.
 
-### 2. GigaChat
-- Заходим в личный кабинет https://developers.sber.ru/portal/products/gigachat.
-- Получаем `Authorization key` (Base64). Это значение для `GIGACHAT_CREDENTIALS`.
-- Выбираем тариф: PERS (бесплатный demo), B2B или CORP. Соответственно `GIGACHAT_SCOPE`.
+### 2. OpenRouter (LLM-парсер, основной)
+- Заходим на https://openrouter.ai, создаём API-ключ → это `OPENROUTER_API_KEY`.
+- Модель — `anthropic/claude-haiku-4.5` (`OPENROUTER_MODEL`).
+- Предоплата в USD. Доступность с RU-IP проверять на самом VPS (см. чек-лист первого запуска).
+
+### 2a. GigaChat (опциональный фолбэк)
+- Нужен, только если включаем резерв на падение OpenRouter. По умолчанию `LLM_BACKEND_FALLBACK` пуст — пункт можно пропустить.
+- Кабинет https://developers.sber.ru/portal/products/gigachat → `Authorization key` (Base64) в `GIGACHAT_CREDENTIALS`, тариф PERS/B2B/CORP → `GIGACHAT_SCOPE`.
 
 ### 3. Google Sheets
 - Создаём проект в Google Cloud Console.
@@ -147,8 +152,8 @@ sudo systemctl restart maxbot
 
 ## Чек-лист первого запуска у клиента
 
-1. [ ] `MAX_BOT_TOKEN` получен и в `.env`.
-2. [ ] `GIGACHAT_CREDENTIALS` получен и в `.env`.
+1. [ ] `MAX_BOT_TOKEN` получен (после модерации) и в `.env`.
+2. [ ] `OPENROUTER_API_KEY` получен и в `.env` (+ `OPENROUTER_MODEL`).
 3. [ ] `secrets/service-account.json` скопирован, права 600.
 4. [ ] Google-таблица создана, расшарена на service account.
 5. [ ] `DEFAULT_SHEET_ID` в `.env`.
@@ -164,8 +169,9 @@ sudo systemctl restart maxbot
 
 | Симптом | Причина | Решение |
 |---------|---------|---------|
-| `GIGACHAT_CREDENTIALS не задан` при старте | Пустой `.env` | Заполнить ключ |
+| `OPENROUTER_API_KEY не задан` при старте | Пустой `.env` | Заполнить ключ |
 | `MAX_BOT_TOKEN не задан` | То же | То же |
+| OpenRouter не отвечает с VPS | RU-IP/блокировка | проверить с сервера; включить `LLM_BACKEND_FALLBACK=gigachat` |
 | Голосовые не распознаются | Нет ffmpeg | `apt install ffmpeg` |
 | GigaAM долго грузится | Первый запуск качает модель ~1 GB | подождать; модель кешируется |
 | Sheets «not found» | Не расшарили на service account | расшарить через UI Google Sheets |
