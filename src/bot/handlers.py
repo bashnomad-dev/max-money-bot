@@ -108,11 +108,14 @@ def make_handlers(client, ctx: AppContext) -> dict[str, Any]:
         await client.reply(message, text)
 
     async def _check_access(message: Any) -> bool:
-        if not is_allowed(_user_id(message)):
+        user_id = _user_id(message)
+        if not is_allowed(user_id):
+            log.info("access denied: user_id=%s не в whitelist", user_id)
             msg = whitelist_msg(settings.silent_reject)
             if msg:
                 await client.reply(message, msg)
             return False
+        log.info("access granted: user_id=%s", user_id)
         return True
 
     # === Команды ===
