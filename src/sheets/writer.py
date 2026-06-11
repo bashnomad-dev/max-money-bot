@@ -156,6 +156,7 @@ def _money_row(
     location: Location | None,
     payment: str,
     tx_id: str,
+    author: str = "",
 ) -> list[Any]:
     """Собрать строку для листа «Движение денег» в порядке MONEY_HEADERS."""
     return [
@@ -169,6 +170,7 @@ def _money_row(
         _safe(location.value if location else None),
         payment,
         tx_id,
+        str(author or ""),
     ]
 
 
@@ -181,6 +183,7 @@ def _goods_row(
     counterparty: str | None,
     comment: str | None,
     tx_id: str,
+    author: str = "",
 ) -> list[Any]:
     """Собрать строку для «Движение товаров» в порядке GOODS_HEADERS."""
     return [
@@ -196,6 +199,7 @@ def _goods_row(
         _esc(_safe(counterparty)),
         _esc(line.comment or comment or ""),
         tx_id,
+        str(author or ""),
     ]
 
 
@@ -203,7 +207,7 @@ def _goods_row(
 # Публичные функции записи
 # ============================================================
 
-def write_sale(spreadsheet, op: Sale) -> WriteResult:
+def write_sale(spreadsheet, op: Sale, author: str = "") -> WriteResult:
     """Sale → товары (расход со склада) + деньги (приход)."""
     result = WriteResult(tx_id=op.tx_id, op_kind="sale")
     try:
@@ -220,6 +224,7 @@ def write_sale(spreadsheet, op: Sale) -> WriteResult:
                     counterparty=op.customer,
                     comment=op.comment,
                     tx_id=op.tx_id,
+                    author=author,
                 ),
             )
             result.refs.append(SheetRowRef(SHEET_GOODS, row_idx))
@@ -237,6 +242,7 @@ def write_sale(spreadsheet, op: Sale) -> WriteResult:
                 location=op.location,
                 payment=op.payment.value,
                 tx_id=op.tx_id,
+                author=author,
             ),
         )
         result.refs.append(SheetRowRef(SHEET_MONEY, money_row_idx))
@@ -249,7 +255,7 @@ def write_sale(spreadsheet, op: Sale) -> WriteResult:
         raise
 
 
-def write_purchase(spreadsheet, op: Purchase) -> WriteResult:
+def write_purchase(spreadsheet, op: Purchase, author: str = "") -> WriteResult:
     """Purchase → товары (поступление) + деньги (расход)."""
     result = WriteResult(tx_id=op.tx_id, op_kind="purchase")
     try:
@@ -266,6 +272,7 @@ def write_purchase(spreadsheet, op: Purchase) -> WriteResult:
                     counterparty=op.supplier,
                     comment=op.comment,
                     tx_id=op.tx_id,
+                    author=author,
                 ),
             )
             result.refs.append(SheetRowRef(SHEET_GOODS, row_idx))
@@ -283,6 +290,7 @@ def write_purchase(spreadsheet, op: Purchase) -> WriteResult:
                 location=op.destination,
                 payment=op.payment.value,
                 tx_id=op.tx_id,
+                author=author,
             ),
         )
         result.refs.append(SheetRowRef(SHEET_MONEY, money_row_idx))
@@ -295,7 +303,7 @@ def write_purchase(spreadsheet, op: Purchase) -> WriteResult:
         raise
 
 
-def write_return(spreadsheet, op: Return) -> WriteResult:
+def write_return(spreadsheet, op: Return, author: str = "") -> WriteResult:
     """Возврат: from_customer → товар +, деньги -; to_supplier → товар -, деньги +."""
     result = WriteResult(tx_id=op.tx_id, op_kind="return")
     try:
@@ -319,6 +327,7 @@ def write_return(spreadsheet, op: Return) -> WriteResult:
                     counterparty=op.counterparty,
                     comment=op.comment,
                     tx_id=op.tx_id,
+                    author=author,
                 ),
             )
             result.refs.append(SheetRowRef(SHEET_GOODS, row_idx))
@@ -336,6 +345,7 @@ def write_return(spreadsheet, op: Return) -> WriteResult:
                 location=op.location,
                 payment=op.payment.value,
                 tx_id=op.tx_id,
+                author=author,
             ),
         )
         result.refs.append(SheetRowRef(SHEET_MONEY, money_row_idx))
@@ -348,7 +358,7 @@ def write_return(spreadsheet, op: Return) -> WriteResult:
         raise
 
 
-def write_cashflow(spreadsheet, op: Cashflow) -> WriteResult:
+def write_cashflow(spreadsheet, op: Cashflow, author: str = "") -> WriteResult:
     """Cashflow — только лист «Движение денег», товары не трогаются."""
     result = WriteResult(tx_id=op.tx_id, op_kind="cashflow")
     money_row_idx = _append_row(
@@ -364,6 +374,7 @@ def write_cashflow(spreadsheet, op: Cashflow) -> WriteResult:
             location=op.location,
             payment=op.payment.value,
             tx_id=op.tx_id,
+            author=author,
         ),
     )
     result.refs.append(SheetRowRef(SHEET_MONEY, money_row_idx))
@@ -373,7 +384,7 @@ def write_cashflow(spreadsheet, op: Cashflow) -> WriteResult:
     return result
 
 
-def write_writeoff_or_movement(spreadsheet, op: WriteoffOrMovement) -> WriteResult:
+def write_writeoff_or_movement(spreadsheet, op: WriteoffOrMovement, author: str = "") -> WriteResult:
     """Списание или перемещение. Только товары + остатки. Деньги не трогаются."""
     result = WriteResult(tx_id=op.tx_id, op_kind=op.op_type.value)
     try:
@@ -391,6 +402,7 @@ def write_writeoff_or_movement(spreadsheet, op: WriteoffOrMovement) -> WriteResu
                         counterparty=None,
                         comment=op.comment,
                         tx_id=op.tx_id,
+                        author=author,
                     ),
                 )
                 result.refs.append(SheetRowRef(SHEET_GOODS, row_idx))
@@ -417,6 +429,7 @@ def write_writeoff_or_movement(spreadsheet, op: WriteoffOrMovement) -> WriteResu
                         counterparty=None,
                         comment=None,
                         tx_id=op.tx_id,
+                        author=author,
                     ),
                 )
                 result.refs.append(SheetRowRef(SHEET_GOODS, row_out))
@@ -433,6 +446,7 @@ def write_writeoff_or_movement(spreadsheet, op: WriteoffOrMovement) -> WriteResu
                         counterparty=None,
                         comment=None,
                         tx_id=op.tx_id,
+                        author=author,
                     ),
                 )
                 result.refs.append(SheetRowRef(SHEET_GOODS, row_in))
@@ -446,7 +460,7 @@ def write_writeoff_or_movement(spreadsheet, op: WriteoffOrMovement) -> WriteResu
         raise
 
 
-def write_inventory(spreadsheet, op: Inventory, expected_stock: dict[str, float]) -> WriteResult:
+def write_inventory(spreadsheet, op: Inventory, expected_stock: dict[str, float], author: str = "") -> WriteResult:
     """Запись инвентаризации: для каждого факта вычисляем дельту и пишем корректировку.
 
     expected_stock: текущие расчётные остатки по {product_canon: qty} на op.location.
@@ -474,6 +488,7 @@ def write_inventory(spreadsheet, op: Inventory, expected_stock: dict[str, float]
                     counterparty=None,
                     comment=None,
                     tx_id=op.tx_id,
+                    author=author,
                 ),
             )
             result.refs.append(SheetRowRef(SHEET_GOODS, row_idx))

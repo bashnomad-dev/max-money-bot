@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from src.config.settings import settings
 from src.domain.operation import (
     Cashflow,
     CashflowType,
@@ -69,36 +70,32 @@ def _location(value: Any) -> Location | None:
 
 
 def _ensure_location(value: Any, field_name: str, raw_text: str) -> Location | ClarificationNeeded:
-    """Для обязательных полей location: если значение пустое/невалидное —
-    возвращаем ClarificationNeeded вместо валидной Location.
+    """Для обязательных полей location: вернуть валидную Location.
 
-    Вызывающий код должен проверить isinstance(result, ClarificationNeeded)
-    и вернуть его как итог парсинга вместо построения операции.
+    Если значение пустое/невалидное — пробуем settings.default_location
+    (режим «не переспрашивать точку»). Если дефолт не задан — ClarificationNeeded,
+    и вызывающий код вернёт его как итог парсинга.
     """
-    if value is None:
-        return ClarificationNeeded(
-            raw_text=raw_text,
-            reason=f"Не указана {field_name}.",
-            question=f"На какую точку: Магазин Зинино или Магазин Кармалы?",
-            intent_hint=None,
-        )
-    s = str(value).strip()
-    if not s or s.lower() in _INVALID_LOC_MARKERS:
-        return ClarificationNeeded(
-            raw_text=raw_text,
-            reason=f"Не указана {field_name}.",
-            question=f"На какую точку: Магазин Зинино или Магазин Кармалы?",
-            intent_hint=None,
-        )
-    try:
-        return Location(s)
-    except ValueError:
-        return ClarificationNeeded(
-            raw_text=raw_text,
-            reason=f"Точка «{s}» не из списка.",
-            question="На какую точку: Магазин Зинино или Магазин Кармалы?",
-            intent_hint=None,
-        )
+    s = "" if value is None else str(value).strip()
+    if s and s.lower() not in _INVALID_LOC_MARKERS:
+        try:
+            return Location(s)
+        except ValueError:
+            pass  # невалидная точка — попробуем дефолт ниже
+
+    default = settings.default_location.strip()
+    if default:
+        try:
+            return Location(default)
+        except ValueError:
+            pass  # дефолт настроен криво — переспросим
+
+    return ClarificationNeeded(
+        raw_text=raw_text,
+        reason=f"Не указана {field_name}.",
+        question="На какую точку: Магазин Зинино или Магазин Кармалы?",
+        intent_hint=None,
+    )
 
 
 def _payment(value: Any) -> PaymentMethod:

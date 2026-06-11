@@ -137,7 +137,7 @@ def start_scheduler(ctx: "AppContext", client: "MAXClient | None"):
 
     # Дневной автоотчёт по cron
     hour, minute = _parse_hhmm(settings.daily_report_time)
-    if client is not None:
+    if client is not None and settings.daily_report_enabled:
         sched.add_job(
             daily_report_job,
             CronTrigger(hour=hour, minute=minute, timezone=settings.tz),
@@ -167,7 +167,8 @@ def start_scheduler(ctx: "AppContext", client: "MAXClient | None"):
 
     sched.start()
     _scheduler = sched
-    log.info("Scheduler started: daily=%s, GC=1m, retries=1m", settings.daily_report_time)
+    daily_status = settings.daily_report_time if settings.daily_report_enabled else "off"
+    log.info("Scheduler started: daily=%s, GC=1m, retries=1m", daily_status)
     return sched
 
 

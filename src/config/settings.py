@@ -29,6 +29,7 @@ class Settings(BaseSettings):
 
     # === STT ===
     stt_engine: str = Field(default="gigaam", description="gigaam | whisper")
+    stt_fallback: str = Field(default="", description="запасной движок если основной упал/пусто: whisper | gigaam | пусто")
     gigaam_model: str = Field(default="v2_rnnt")
     openai_api_key: str = Field(default="")  # для whisper fallback
     anthropic_api_key: str = Field(default="")  # для claude fallback
@@ -54,6 +55,15 @@ class Settings(BaseSettings):
     # === Отчёты ===
     daily_report_time: str = Field(default="21:00")
     daily_report_max_retries: int = Field(default=5, ge=1, le=20)
+    daily_report_enabled: bool = Field(default=True, description="Слать дневной автоотчёт по cron")
+
+    # === Упрощение (режим «записная книжка», SPEC: сбор данных) ===
+    enable_stock_tracking: bool = Field(
+        default=True, description="Считать остатки, лист «Остатки», предупреждение о минусе"
+    )
+    enforce_product_canonicalization: bool = Field(
+        default=True, description="Сверять товар с каталогом; False → писать как надиктовано"
+    )
 
     # === Гибридный UX ===
     auto_write_confidence_threshold: float = Field(default=0.85, ge=0.0, le=1.0)

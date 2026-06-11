@@ -91,7 +91,7 @@ class DialogEngine:
 
         # 2. Канонизация: новые товары или новые точки
         # (только для операций с lines или location)
-        if hasattr(op, "lines") and op.lines:
+        if settings.enforce_product_canonicalization and hasattr(op, "lines") and op.lines:
             for line in op.lines:
                 if line.name and line.name.lower() not in self._known_products:
                     # Просто отмечаем сценарий; конкретный кандидат подбирается в хендлере

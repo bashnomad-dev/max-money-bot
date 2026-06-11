@@ -182,3 +182,39 @@ def test_undo_by_refs_removes_rows(spreadsheet_with_sheets):
     assert removed == 2
     assert len(money_ws.rows) == 1  # только заголовок
     assert len(goods_ws.rows) == 1
+
+
+def test_author_written_to_last_column(spreadsheet_with_sheets):
+    """MAX user_id автора пишется в последнюю колонку «Автор» обоих листов."""
+    op = Sale(
+        tx_id="ts_author",
+        occurred_at=_now(),
+        amount_kopecks=1_800_000,
+        lines=[GoodsLine(name="цемент", qty=30, unit="меш.")],
+        location=Location.ZININO,
+        payment=PaymentMethod.CASH,
+        confidence=_conf(),
+        raw_text="test",
+    )
+    write_sale(spreadsheet_with_sheets, op, author="9876543")
+    money_ws = spreadsheet_with_sheets.worksheet(SHEET_MONEY)
+    goods_ws = spreadsheet_with_sheets.worksheet(SHEET_GOODS)
+    # «Автор» — последняя колонка по заголовкам
+    assert money_ws.rows[0][-1] == "Автор"
+    assert money_ws.rows[1][-1] == "9876543"
+    assert goods_ws.rows[1][-1] == "9876543"
+
+
+def test_author_blank_when_not_passed(spreadsheet_with_sheets):
+    op = Cashflow(
+        tx_id="ts_noauthor",
+        occurred_at=_now(),
+        op_type=CashflowType.EXPENSE,
+        amount_kopecks=200_000,
+        description="налоги",
+        confidence=_conf(),
+        raw_text="test",
+    )
+    write_cashflow(spreadsheet_with_sheets, op)
+    money_ws = spreadsheet_with_sheets.worksheet(SHEET_MONEY)
+    assert money_ws.rows[1][-1] == ""

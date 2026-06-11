@@ -232,3 +232,18 @@ def test_ensure_worksheet_marker_sheet_is_idempotent(fake_spreadsheet):
     result_ws, created = ensure_worksheet(fake_spreadsheet, spec)
     assert created is False
     assert result_ws is ws
+
+
+def test_ensure_worksheet_migrates_old_headers_adds_author(fake_spreadsheet):
+    """Старая схема без колонки «Автор» → /setup дописывает заголовок, не падает."""
+    from src.sheets.schema import SPECS, SHEET_MONEY
+    from src.sheets.setup import ensure_worksheet
+
+    spec = SPECS[SHEET_MONEY]
+    old_headers = spec.headers[:-1]  # без «Автор»
+    ws = fake_spreadsheet.add_worksheet(SHEET_MONEY)
+    ws.append_row(old_headers)
+
+    result_ws, created = ensure_worksheet(fake_spreadsheet, spec)
+    assert created is False
+    assert result_ws.rows[0] == spec.headers  # заголовки расширены, «Автор» добавлен

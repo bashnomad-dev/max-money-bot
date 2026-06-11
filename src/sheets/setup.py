@@ -89,11 +89,19 @@ def ensure_worksheet(spreadsheet, spec: SheetSpec) -> tuple[object, bool]:
             header_row = 1
         existing_headers = ws.row_values(header_row)
         if existing_headers and existing_headers[: len(spec.headers)] != spec.headers:
-            raise SheetsSetupError(
-                f"Лист «{spec.name}» имеет несовпадающие заголовки.\n"
-                f"  Ожидаем: {spec.headers}\n"
-                f"  Найдено: {existing_headers[: len(spec.headers)]}"
-            )
+            # Миграция старой схемы: если существующие заголовки — точный префикс
+            # новых (например, ещё нет колонки «Автор»), дописываем недостающие.
+            # Иначе — реальное расхождение, не трогаем (могут быть пользовательские колонки).
+            if spec.headers[: len(existing_headers)] == existing_headers:
+                ws.update(f"A{header_row}", [spec.headers])
+                log.info("Лист «%s»: заголовки обновлены до новой схемы (+%d)",
+                         spec.name, len(spec.headers) - len(existing_headers))
+            else:
+                raise SheetsSetupError(
+                    f"Лист «{spec.name}» имеет несовпадающие заголовки.\n"
+                    f"  Ожидаем: {spec.headers}\n"
+                    f"  Найдено: {existing_headers[: len(spec.headers)]}"
+                )
         if not existing_headers:
             ws.update(f"A{header_row}", [spec.headers])
         return ws, False

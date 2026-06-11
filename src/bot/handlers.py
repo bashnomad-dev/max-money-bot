@@ -506,10 +506,15 @@ def make_handlers(client, ctx: AppContext) -> dict[str, Any]:
             )
             await _send(message, result)
 
-        if lower in ("да", "ага", "ок", "верно", "+", "новая"):
+        # Нормализуем: убираем хвостовую пунктуацию/пробелы («да.», «да!» → «да»)
+        answer = lower.strip(" .!,)(-")
+        if answer in (
+            "да", "ага", "ок", "окей", "верно", "+", "новая", "угу", "конечно",
+            "да-да", "дада", "ну да", "запиши", "записывай", "сохрани", "сохраняй", "пиши",
+        ):
             await _do_write_from_state()
             return
-        if lower in ("нет", "повтор", "не записывай"):
+        if answer in ("нет", "не", "не надо", "повтор", "не записывай", "отмена"):
             ctx.dialog.clear(chat_id)
             await client.reply(message, "Понял — не записываю.")
             return
@@ -581,9 +586,10 @@ def make_handlers(client, ctx: AppContext) -> dict[str, Any]:
             await _write_with_canon(None, is_existing=False)
             return
 
-        # 2. Число — выбор из кандидатов
-        if raw.isdigit():
-            idx = int(raw)
+        # 2. Число — выбор из кандидатов («2», «2.», «2)» тоже считаем номером)
+        num = raw.strip(" .)(-")
+        if num.isdigit():
+            idx = int(num)
             if 1 <= idx <= len(candidates):
                 await _write_with_canon(candidates[idx - 1], is_existing=True)
                 return

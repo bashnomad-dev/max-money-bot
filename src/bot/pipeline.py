@@ -115,10 +115,8 @@ async def process_parsed(
         if spreadsheet is None:
             return NEED_LINK_MSG
         if not parsed.period_is_clear:
-            period_word = {"month": "месяц", "quarter": "квартал", "year": "год"}.get(
-                parsed.period_type.value, "период"
-            )
-            return f"За какой {period_word} сделать отчёт: за текущий или за конкретный?"
+            # Не переспрашиваем (это зацикливало диалог на ДЕМО) — берём текущий период.
+            parsed = parsed.model_copy(update={"relative": "current", "period_is_clear": True})
         rep = build_period_report(
             spreadsheet,
             period_type=parsed.period_type.value,
@@ -229,7 +227,7 @@ async def process_parsed(
 
     if decision.step == DialogStep.WRITE:
         # Защита от ухода остатка в минус (SPEC §17 п.22) — только для выбывающих операций.
-        if isinstance(parsed, (Sale, Return, WriteoffOrMovement)):
+        if settings.enable_stock_tracking and isinstance(parsed, (Sale, Return, WriteoffOrMovement)):
             try:
                 spreadsheet = _open_spreadsheet_for_chat(ctx, chat_id)
                 warning = _negative_stock_warning(spreadsheet, parsed) if spreadsheet else None
@@ -283,7 +281,7 @@ async def _do_write(
         return NEED_LINK_MSG
 
     try:
-        result = _dispatch_write(spreadsheet, parsed)
+        result = _dispatch_write(spreadsheet, parsed, author=user_id)
     except Exception as e:  # noqa: BLE001
         log.exception("Sheets write failed")
         # Очередь pending_writes
@@ -319,17 +317,19 @@ async def _do_write(
         )
 
     # Апдейт листа «Остатки» для затронутых (товар, точка). При ошибке — не блокируем.
-    affected = _affected_stock_keys(parsed)
-    if affected:
-        try:
-            rows = _read_goods_rows(spreadsheet)
-            calc = recompute_from_movements(rows)
-            sync_after_op(spreadsheet, calc, affected)
-        except Exception:
-            log.exception("sync_after_op failed для tx_id=%s; запускай /repair stock", result.tx_id)
+    if settings.enable_stock_tracking:
+        affected = _affected_stock_keys(parsed)
+        if affected:
+            try:
+                rows = _read_goods_rows(spreadsheet)
+                calc = recompute_from_movements(rows)
+                sync_after_op(spreadsheet, calc, affected)
+            except Exception:
+                log.exception("sync_after_op failed для tx_id=%s; запускай /repair stock", result.tx_id)
 
-    # Возвращаем маркер «реакция» (хендлер сам поставит ✅) либо текст
-    return WROTE_REACTION  # маркер для хендлера
+    # Показываем, что именно записали (с точкой) — это и «подтверждение», и заметка владельцу.
+    summary = _summary_for_card(parsed)
+    return f"✅ Записал:\n{summary}" if summary else WROTE_REACTION
 
 
 _PARSED_CLASSES = {
@@ -433,24 +433,24 @@ def _negative_stock_warning(spreadsheet, op: Any) -> str | None:
     return CARD_NEGATIVE_STOCK_MSG.format(lines="\n".join(bad))
 
 
-def _dispatch_write(spreadsheet, op: Any):
+def _dispatch_write(spreadsheet, op: Any, author: str = ""):
     if isinstance(op, Sale):
-        return write_sale(spreadsheet, op)
+        return write_sale(spreadsheet, op, author=author)
     if isinstance(op, Purchase):
-        return write_purchase(spreadsheet, op)
+        return write_purchase(spreadsheet, op, author=author)
     if isinstance(op, Return):
-        return write_return(spreadsheet, op)
+        return write_return(spreadsheet, op, author=author)
     if isinstance(op, Cashflow):
-        return write_cashflow(spreadsheet, op)
+        return write_cashflow(spreadsheet, op, author=author)
     if isinstance(op, WriteoffOrMovement):
-        return write_writeoff_or_movement(spreadsheet, op)
+        return write_writeoff_or_movement(spreadsheet, op, author=author)
     if isinstance(op, Inventory):
         # Расчётный остаток на момент инвентаризации — из истории движений.
         calc = recompute_from_movements(_read_goods_rows(spreadsheet))
         expected_stock = {
             fact.name: calc.get_qty(fact.name, op.location.value) for fact in op.facts
         }
-        return write_inventory(spreadsheet, op, expected_stock=expected_stock)
+        return write_inventory(spreadsheet, op, expected_stock=expected_stock, author=author)
     raise TypeError(f"Не поддерживаемый тип для записи: {type(op).__name__}")
 
 
@@ -468,12 +468,16 @@ def _summary_for_card(parsed: Any) -> str:
     if isinstance(parsed, Return):
         direction = "от" if parsed.direction.value == "from_customer" else "к"
         lines = ", ".join(f"{l.name} {l.qty}{l.unit}" for l in parsed.lines)
-        return f"↩️ Возврат {direction} {parsed.counterparty}: {lines} на {parsed.amount_kopecks//100}₽"
+        return f"↩️ Возврат {direction} {parsed.counterparty}: {lines} на {parsed.amount_kopecks//100}₽ ({parsed.location.value})"
     if isinstance(parsed, WriteoffOrMovement):
         lines = ", ".join(f"{l.name} {l.qty}{l.unit}" for l in parsed.lines)
         if parsed.op_type.value == "перемещение":
             return f"🔄 Перемещение {parsed.source.value} → {parsed.destination.value}: {lines}"
-        return f"🗑 Списание ({parsed.comment or ''}): {lines}"
+        loc = f" ({parsed.location.value})" if parsed.location else ""
+        return f"🗑 Списание ({parsed.comment or ''}): {lines}{loc}"
+    if isinstance(parsed, Inventory):
+        facts = ", ".join(f"{f.name} {f.qty}{f.unit}" for f in parsed.facts)
+        return f"📋 Инвентаризация на {parsed.location.value}: {facts}"
     return repr(parsed)[:200]
 
 
