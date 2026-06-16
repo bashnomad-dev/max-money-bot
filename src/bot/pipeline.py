@@ -296,7 +296,7 @@ async def _do_write(
         return SHEETS_DOWN_MSG
 
     # Лог в operations_log
-    ctx.operations_log.log(
+    op_id = ctx.operations_log.log(
         chat_id=chat_id,
         user_id=user_id,
         message_id=message_id,
@@ -326,6 +326,20 @@ async def _do_write(
                 sync_after_op(spreadsheet, calc, affected)
             except Exception:
                 log.exception("sync_after_op failed для tx_id=%s; запускай /repair stock", result.tx_id)
+
+    # Окно дополнения: короткое сообщение после записи («нал», «Кармалы», «контрагент Петров»)
+    # дополнит эту операцию, а не начнёт новую. Только для интерактивных записей (не ретрай).
+    if user_id and user_id != "system":
+        ctx.dialog.set(
+            chat_id,
+            intent="awaiting_supplement",
+            partial_data={
+                "op_id": op_id,
+                "sheet_refs": result.refs_as_dicts(),
+                "op_kind": result.op_kind,
+            },
+            ttl_minutes=settings.dialog_state_ttl_minutes,
+        )
 
     # Показываем, что именно записали (с точкой) — это и «подтверждение», и заметка владельцу.
     summary = _summary_for_card(parsed)

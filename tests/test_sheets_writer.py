@@ -218,3 +218,43 @@ def test_author_blank_when_not_passed(spreadsheet_with_sheets):
     write_cashflow(spreadsheet_with_sheets, op)
     money_ws = spreadsheet_with_sheets.worksheet(SHEET_MONEY)
     assert money_ws.rows[1][-1] == ""
+
+
+def test_edit_last_field_payment_and_location(spreadsheet_with_sheets):
+    """Дополнение последней операции: оплата → кол.9, точка → кол.8 (с канонизацией опечатки)."""
+    from src.sheets.writer import edit_last_field
+    op = Sale(
+        tx_id="ts_supp",
+        occurred_at=_now(),
+        amount_kopecks=1_800_000,
+        lines=[GoodsLine(name="цемент", qty=30, unit="меш.")],
+        location=Location.ZININO,
+        payment=PaymentMethod.UNKNOWN,
+        confidence=_conf(),
+        raw_text="test",
+    )
+    result = write_sale(spreadsheet_with_sheets, op)
+    refs = result.refs_as_dicts()
+
+    edit_last_field(spreadsheet_with_sheets, refs, "оплата", "нал")
+    money_ws = spreadsheet_with_sheets.worksheet(SHEET_MONEY)
+    assert money_ws.rows[1][8] == "наличные"   # кол.9 «Способ оплаты»
+
+    edit_last_field(spreadsheet_with_sheets, refs, "точка", "Карамалы")
+    assert money_ws.rows[1][7] == "Магазин Кармалы"  # кол.8 «Точка», опечатка распознана
+
+
+def test_edit_last_field_rejects_bad_payment(spreadsheet_with_sheets):
+    from src.sheets.writer import edit_last_field
+    op = Cashflow(
+        tx_id="ts_badpay",
+        occurred_at=_now(),
+        op_type=CashflowType.EXPENSE,
+        amount_kopecks=200_000,
+        description="налоги",
+        confidence=_conf(),
+        raw_text="test",
+    )
+    result = write_cashflow(spreadsheet_with_sheets, op)
+    with pytest.raises(ValueError):
+        edit_last_field(spreadsheet_with_sheets, result.refs_as_dicts(), "оплата", "абракадабра")

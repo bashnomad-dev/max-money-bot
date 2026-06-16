@@ -42,6 +42,7 @@ from src.bot.text_responses import (
     WROTE_REACTION,
     whitelist_msg,
 )
+from src.canonicalize import canonicalize_location
 from src.config.settings import settings
 from src.reports.daily import build_daily_report, format_daily_report
 from src.reports.stock import format_stock_report
@@ -433,6 +434,10 @@ def make_handlers(client, ctx: AppContext) -> dict[str, Any]:
             await _process_canon_response(message, text, state)
             return
 
+        if intent == "awaiting_supplement":
+            await _process_supplement_response(message, text, state)
+            return
+
         if intent == "awaiting_clarification":
             # Склеиваем оригинальный текст + новый ответ → парсим заново.
             # Это даёт LLM полный контекст (например: «Купил у Леруа 50 мешков
@@ -605,6 +610,59 @@ def make_handlers(client, ctx: AppContext) -> dict[str, Any]:
             message,
             "Не понял. Ответь номером (1, 2, 3), «новый» или напиши полное имя нового товара.",
         )
+
+    async def _process_supplement_response(message: Any, text: str, state: dict) -> None:
+        """Короткое сообщение сразу после записи дополняет последнюю операцию
+        (оплата / точка / контрагент / сумма). Если это новая операция — отдаём
+        в обычный разбор, не проглатывая."""
+        chat_id = _chat_id(message)
+        partial = state["partial_data"]
+        refs = partial.get("sheet_refs", [])
+        raw = text.strip()
+        low = raw.lower()
+
+        field: str | None = None
+        value = raw
+        for pref, fld in (
+            ("оплата", "оплата"), ("способ", "оплата"), ("точка", "точка"),
+            ("контрагент", "контрагент"), ("клиент", "контрагент"),
+            ("поставщик", "контрагент"), ("сумма", "сумма"),
+        ):
+            if low.startswith(pref):
+                field = fld
+                value = raw[len(pref):].strip(" :-—") or raw
+                break
+
+        if field is None and len(raw.split()) <= 2:
+            # Голое короткое сообщение: «нал» / «Кармалы»
+            pay_hints = ("нал", "карт", "счет", "счёт", "перевод", "безнал", "кэш", "расчет")
+            if any(h in low for h in pay_hints):
+                field, value = "оплата", raw
+            elif canonicalize_location(raw) is not None:
+                field, value = "точка", raw
+
+        if field is None:
+            # Не дополнение — это новая операция, отдаём в обычный разбор.
+            ctx.dialog.clear(chat_id)
+            await _process_text(message, text)
+            return
+
+        spreadsheet = _open_spreadsheet(ctx, chat_id)
+        if spreadsheet is None:
+            ctx.dialog.clear(chat_id)
+            await client.reply(message, NEED_LINK_MSG)
+            return
+        ctx.dialog.clear(chat_id)
+        try:
+            changed = edit_last_field(spreadsheet, refs, field, value)
+        except ValueError as e:
+            await client.reply(message, str(e))
+            return
+        except Exception:  # noqa: BLE001
+            log.exception("supplement edit failed")
+            await client.reply(message, "Не получилось дополнить. Попробуй /правка.")
+            return
+        await client.reply(message, f"Добавил к последней операции — {changed}")
 
     return {
         "start": handle_start,

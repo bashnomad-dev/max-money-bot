@@ -16,12 +16,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from src.canonicalize import canonicalize_location
 from src.config.settings import settings
 from src.domain.operation import (
     Cashflow,
     GoodsLine,
     Inventory,
     Location,
+    PaymentMethod,
     Purchase,
     Return,
     ReturnDirection,
@@ -531,7 +533,26 @@ EDIT_FIELDS: dict[str, tuple[str, int]] = {
     "сумма": ("Сумма (₽)", 4),
     "контрагент": ("Контрагент", 7),
     "описание": ("Описание", 5),
+    "точка": ("Точка", 8),
+    "оплата": ("Способ оплаты", 9),
+    "способ": ("Способ оплаты", 9),
 }
+
+# Слова → канонический способ оплаты
+_PAYMENT_WORDS: dict[str, PaymentMethod] = {
+    "нал": PaymentMethod.CASH, "налич": PaymentMethod.CASH, "кэш": PaymentMethod.CASH,
+    "карт": PaymentMethod.CARD,
+    "счет": PaymentMethod.TRANSFER, "счёт": PaymentMethod.TRANSFER,
+    "перевод": PaymentMethod.TRANSFER, "расчет": PaymentMethod.TRANSFER, "безнал": PaymentMethod.TRANSFER,
+}
+
+
+def _normalize_payment(value: str) -> PaymentMethod | None:
+    low = value.strip().lower().replace("ё", "е")
+    for word, pm in _PAYMENT_WORDS.items():
+        if word.replace("ё", "е") in low:
+            return pm
+    return None
 
 
 def _parse_amount_rub(value: str) -> int | None:
@@ -556,7 +577,7 @@ def edit_last_field(spreadsheet, sheet_refs: list[dict[str, Any]], field: str, v
     spec = EDIT_FIELDS.get(fld)
     if spec is None:
         raise ValueError(
-            f"Неизвестное поле «{field}». Можно править: сумма, контрагент, описание."
+            f"Неизвестное поле «{field}». Можно править: сумма, контрагент, описание, точка, оплата."
         )
     header, col = spec
     money_ref = next((r for r in sheet_refs if r["sheet"] == SHEET_MONEY), None)
@@ -568,6 +589,16 @@ def edit_last_field(spreadsheet, sheet_refs: list[dict[str, Any]], field: str, v
         if amount is None:
             raise ValueError("Сумма должна быть числом, например: /edit last сумма 18000")
         cell_value: Any = amount
+    elif fld == "точка":
+        loc = canonicalize_location(value)
+        if loc is None:
+            raise ValueError("Не понял точку. Скажи «Зинино» или «Кармалы».")
+        cell_value = loc.value
+    elif fld in ("оплата", "способ"):
+        pm = _normalize_payment(value)
+        if pm is None:
+            raise ValueError("Способ оплаты: наличные, карта или счёт.")
+        cell_value = pm.value
     else:
         cell_value = value.strip()
 

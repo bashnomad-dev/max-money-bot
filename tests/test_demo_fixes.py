@@ -147,3 +147,33 @@ class TestSTTFallback:
 
         eng = FallbackSTTEngine(Ok1(), Ok2())
         assert self._run(eng.transcribe(None)) == "основной"
+
+
+class TestLocationCanonicalization:
+    """canonicalize_location подключён и терпит опечатки; «магазин» не ловит ложно."""
+
+    def test_typos_map_to_location(self):
+        from src.canonicalize import canonicalize_location
+        from src.domain.operation import Location
+        assert canonicalize_location("Карамалы") == Location.KARMALY
+        assert canonicalize_location("кормалы") == Location.KARMALY
+        assert canonicalize_location("зенино") == Location.ZININO
+        assert canonicalize_location("Зинино") == Location.ZININO
+
+    def test_magazin_word_not_false_positive(self):
+        from src.canonicalize import canonicalize_location
+        from src.domain.operation import Location
+        # «магазин» содержит «зин» — не должно ложно матчить ZININO
+        assert canonicalize_location("магазин Кармалы") == Location.KARMALY
+
+    def test_unknown_is_none(self):
+        from src.canonicalize import canonicalize_location
+        assert canonicalize_location("привет") is None
+
+    def test_sale_with_typo_location(self, monkeypatch):
+        monkeypatch.setattr(settings, "default_location", "")  # чтобы сработала именно канонизация
+        op = build_command_from_tool_call(
+            "record_sale", _sale_args(location="Карамалы"), "test", "tx_loc", _now()
+        )
+        assert isinstance(op, Sale)
+        assert op.location == Location.KARMALY

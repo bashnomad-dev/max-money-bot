@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from src.canonicalize import canonicalize_location
 from src.config.settings import settings
 from src.domain.operation import (
     Cashflow,
@@ -60,35 +61,37 @@ def _lines(raw_lines: list[dict[str, Any]]) -> list[GoodsLine]:
 _INVALID_LOC_MARKERS = {"<unknown>", "unknown", "null", "none", "не указано", "?", "—", "-"}
 
 
-def _location(value: Any) -> Location | None:
+def _coerce_location(value: Any) -> Location | None:
+    """Сырое значение → Location: прямой матч enum, затем канонизация опечаток
+    («Карамалы», «кормалы» и т.п.). None — пусто/не распознано."""
     if value is None:
         return None
     s = str(value).strip()
     if not s or s.lower() in _INVALID_LOC_MARKERS:
         return None
-    return Location(s)
+    try:
+        return Location(s)
+    except ValueError:
+        return canonicalize_location(s)
+
+
+def _location(value: Any) -> Location | None:
+    return _coerce_location(value)
 
 
 def _ensure_location(value: Any, field_name: str, raw_text: str) -> Location | ClarificationNeeded:
     """Для обязательных полей location: вернуть валидную Location.
 
-    Если значение пустое/невалидное — пробуем settings.default_location
-    (режим «не переспрашивать точку»). Если дефолт не задан — ClarificationNeeded,
-    и вызывающий код вернёт его как итог парсинга.
+    Порядок: значение (с канонизацией опечаток) → settings.default_location
+    (режим «не переспрашивать точку») → ClarificationNeeded.
     """
-    s = "" if value is None else str(value).strip()
-    if s and s.lower() not in _INVALID_LOC_MARKERS:
-        try:
-            return Location(s)
-        except ValueError:
-            pass  # невалидная точка — попробуем дефолт ниже
+    loc = _coerce_location(value)
+    if loc is not None:
+        return loc
 
-    default = settings.default_location.strip()
-    if default:
-        try:
-            return Location(default)
-        except ValueError:
-            pass  # дефолт настроен криво — переспросим
+    default = _coerce_location(settings.default_location)
+    if default is not None:
+        return default
 
     return ClarificationNeeded(
         raw_text=raw_text,
